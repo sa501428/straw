@@ -28,29 +28,34 @@ using namespace std;
 
 int main(int argc, char *argv[])
 {
-    if (argc != 7 && argc != 8) {
+    if (argc != 3) {
         cerr << "Incorrect arguments" << endl;
         cerr << "Usage: straw <NONE/VC/VC_SQRT/KR> <hicFile(s)> <chr1>[:x1:x2] <chr2>[:y1:y2] <BP/FRAG> <binsize>" << endl;
         cerr << "Usage: straw <oe> <NONE/VC/VC_SQRT/KR> <hicFile(s)> <chr1>[:x1:x2] <chr2>[:y1:y2] <BP/FRAG> <binsize>" << endl;
         exit(1);
     }
-    int offset = 0;
     string matrixType = "observed";
-    if(argc == 8){
-        offset = 1;
-        matrixType = argv[1];
-    }
-    string norm = argv[1 + offset];
-    string fname = argv[2 + offset];
-    string chr1loc = argv[3 + offset];
-    string chr2loc = argv[4 + offset];
-    string unit = argv[5 + offset];
-    string size = argv[6 + offset];
+    string norm = "NONE";
+    string fname = argv[1];
+    string unit = "BP";
+    string size = argv[2];
     int32_t binsize = stoi(size);
-    vector<contactRecord> records;
-    records = straw(matrixType, norm, fname, chr1loc, chr2loc, unit, binsize);
-    size_t length = records.size();
-    for (int i = 0; i < length; i++) {
-        printf("%d\t%d\t%.14g\n", records[i].binX, records[i].binY, records[i].counts);
+    vector<chromosome> chroms = getChromosomes(fname);
+
+    for(int ci = 0; ci < chroms.size(); ci++){
+        printf("%s\n", chroms[ci].name.c_str());
     }
+    int starting_index = 0;
+    /*
+    for(int ci = starting_index; ci < chroms.size(); ci++){
+        for(int cj = ci; cj < chroms.size(); cj++){
+            vector<contactRecord> records = straw(matrixType, norm, fname, chroms[ci].name, chroms[cj].name, unit, binsize);
+            for (int z = 0; z < records.size(); z++) {
+                printf("%s\t%d\t%s\t%d\t%.14g\n", chroms[ci].name.c_str(), records[z].binX,
+                       chroms[cj].name.c_str(), records[z].binY, records[z].counts);
+            }
+        }
+    }
+     *
+     */
 }

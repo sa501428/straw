@@ -95,4 +95,8 @@ std::vector<contactRecord>
 straw(std::string matrixType, std::string norm, std::string fname, std::string chr1loc, std::string chr2loc,
       const std::string &unit, int32_t binsize);
 
+std::vector<chromosome> getChromosomes(std::string fname);
+
+//int getSize(std::string norm, std::string fname, std::string chr1loc, std::string chr2loc, std::string unit, int binsize);
+
 #endif

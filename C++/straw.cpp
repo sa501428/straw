@@ -1253,3 +1253,49 @@ vector<chromosome> getChromosomes(string fname){
     hiCFile->close();
     return chromosomes;
 }
+
+/*
+int getSize(string matrixType, string norm, string fname, string chr1loc, string chr2loc, const string &unit, int32_t binsize){
+    if (!(unit == "BP" || unit == "FRAG")) {
+        cerr << "Norm specified incorrectly, must be one of <BP/FRAG>" << endl;
+        cerr << "Usage: straw <NONE/VC/VC_SQRT/KR> <hicFile(s)> <chr1>[:x1:x2] <chr2>[:y1:y2] <BP/FRAG> <binsize>"
+             << endl;
+        return 0;
+    }
+
+    HiCFile *hiCFile = new HiCFile(std::move(fname));
+
+    string chr1, chr2;
+    int64_t c1pos1 = -100LL, c1pos2 = -100LL, c2pos1 = -100LL, c2pos2 = -100LL;
+    parsePositions(std::move(chr1loc), chr1, c1pos1, c1pos2, hiCFile->chromosomeMap);
+    parsePositions(std::move(chr2loc), chr2, c2pos1, c2pos2, hiCFile->chromosomeMap);
+
+    // from header have size of chromosomes, set region to read
+
+    int64_t origRegionIndices[4]; // as given by user
+    // reverse order if necessary
+    if (hiCFile->chromosomeMap[chr1].index > hiCFile->chromosomeMap[chr2].index) {
+        origRegionIndices[0] = c2pos1;
+        origRegionIndices[1] = c2pos2;
+        origRegionIndices[2] = c1pos1;
+        origRegionIndices[3] = c1pos2;
+    } else {
+        origRegionIndices[0] = c1pos1;
+        origRegionIndices[1] = c1pos2;
+        origRegionIndices[2] = c2pos1;
+        origRegionIndices[3] = c2pos2;
+    }
+    hiCFile->close();
+
+    footerInfo footer = getNormalizationInfoForRegion(fname, chr1, chr2, matrixType, norm, unit, binsize);
+
+    return getNumberOfBlockRecordsWithNormalization(fname,
+                                            origRegionIndices[0], origRegionIndices[1],
+                                            origRegionIndices[2], origRegionIndices[3],
+                                            footer.resolution, footer.foundFooter, footer.version,
+                                            footer.c1, footer.c2, footer.numBins1, footer.numBins2,
+                                            footer.myFilePos, footer.unit, footer.norm, footer.matrixType,
+                                            footer.c1Norm, footer.c2Norm, footer.expectedValues);
+
+}
+*/
