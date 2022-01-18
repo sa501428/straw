@@ -31,6 +31,7 @@
 #include <utility>
 #include <vector>
 #include <streambuf>
+#include <thread>
 #include <curl/curl.h>
 #include "zlib.h"
 #include "straw.h"
@@ -68,7 +69,7 @@ WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp) {
 }
 
 // get a buffer that can be used as an input stream from the URL
-char *getData(CURL *curl, int64_t position, int64_t chunksize) {
+static char *getData(CURL *curl, int64_t position, int64_t chunksize) {
     std::ostringstream oss;
     struct MemoryStruct chunk{};
     chunk.memory = static_cast<char *>(malloc(1));
@@ -85,43 +86,43 @@ char *getData(CURL *curl, int64_t position, int64_t chunksize) {
     return chunk.memory;
 }
 
-bool readMagicString(istream &fin) {
+static bool readMagicString(istream &fin) {
     string str;
     getline(fin, str, '\0');
     return str[0] == 'H' && str[1] == 'I' && str[2] == 'C';
 }
 
-char readCharFromFile(istream &fin) {
+static char readCharFromFile(istream &fin) {
     char tempChar;
     fin.read(&tempChar, sizeof(char));
     return tempChar;
 }
 
-int16_t readInt16FromFile(istream &fin) {
+static int16_t readInt16FromFile(istream &fin) {
     int16_t tempInt16;
     fin.read((char *) &tempInt16, sizeof(int16_t));
     return tempInt16;
 }
 
-int32_t readInt32FromFile(istream &fin) {
+static int32_t readInt32FromFile(istream &fin) {
     int32_t tempInt32;
     fin.read((char *) &tempInt32, sizeof(int32_t));
     return tempInt32;
 }
 
-int64_t readInt64FromFile(istream &fin) {
+static int64_t readInt64FromFile(istream &fin) {
     int64_t tempInt64;
     fin.read((char *) &tempInt64, sizeof(int64_t));
     return tempInt64;
 }
 
-float readFloatFromFile(istream &fin) {
+static float readFloatFromFile(istream &fin) {
     float tempFloat;
     fin.read((char *) &tempFloat, sizeof(float));
     return tempFloat;
 }
 
-double readDoubleFromFile(istream &fin) {
+static double readDoubleFromFile(istream &fin) {
     double tempDouble;
     fin.read((char *) &tempDouble, sizeof(double));
     return tempDouble;
@@ -185,7 +186,7 @@ public:
     }
 };
 
-char *readCompressedBytesFromFile(const string &fileName, indexEntry idx) {
+static char *readCompressedBytesFromFile(const string &fileName, indexEntry idx) {
     HiCFileStream *stream = new HiCFileStream(fileName);
     char *compressedBytes = stream->readCompressedBytes(idx);
     stream->close();
@@ -194,7 +195,7 @@ char *readCompressedBytesFromFile(const string &fileName, indexEntry idx) {
 }
 
 // reads the header, storing the positions of the normalization vectors and returning the masterIndexPosition pointer
-map<string, chromosome> readHeader(istream &fin, int64_t &masterIndexPosition, string &genomeID, int32_t &numChromosomes,
+static map<string, chromosome> readHeader(istream &fin, int64_t &masterIndexPosition, string &genomeID, int32_t &numChromosomes,
                                    int32_t &version, int64_t &nviPosition, int64_t &nviLength) {
     map<string, chromosome> chromosomeMap;
     if (!readMagicString(fin)) {
@@ -247,7 +248,7 @@ map<string, chromosome> readHeader(istream &fin, int64_t &masterIndexPosition, s
     return chromosomeMap;
 }
 
-vector<int32_t> readResolutionsFromHeader(istream &fin) {
+static vector<int32_t> readResolutionsFromHeader(istream &fin) {
     int numBpResolutions = readInt32FromFile(fin);
     vector<int32_t> resolutions;
     for (int i = 0; i < numBpResolutions; i++) {
@@ -257,21 +258,21 @@ vector<int32_t> readResolutionsFromHeader(istream &fin) {
     return resolutions;
 }
 
-void populateVectorWithFloats(istream &fin, vector<double> &vector, int64_t nValues) {
+static void populateVectorWithFloats(istream &fin, vector<double> &vector, int64_t nValues) {
     for (int j = 0; j < nValues; j++) {
         double v = readFloatFromFile(fin);
         vector.push_back(v);
     }
 }
 
-void populateVectorWithDoubles(istream &fin, vector<double> &vector, int64_t nValues) {
+static void populateVectorWithDoubles(istream &fin, vector<double> &vector, int64_t nValues) {
     for (int j = 0; j < nValues; j++) {
         double v = readDoubleFromFile(fin);
         vector.push_back(v);
     }
 }
 
-void readThroughExpectedVector(int32_t version, istream &fin, vector<double> &expectedValues, int64_t nValues,
+static void readThroughExpectedVector(int32_t version, istream &fin, vector<double> &expectedValues, int64_t nValues,
                                bool store) {
     if (store) {
         if (version > 8) {
@@ -288,7 +289,7 @@ void readThroughExpectedVector(int32_t version, istream &fin, vector<double> &ex
     }
 }
 
-void readThroughNormalizationFactors(istream &fin, int32_t version, bool store, vector<double> &expectedValues,
+static void readThroughNormalizationFactors(istream &fin, int32_t version, bool store, vector<double> &expectedValues,
                                      int32_t c1) {
     int32_t nNormalizationFactors = readInt32FromFile(fin);
     if (store){
@@ -319,7 +320,7 @@ void readThroughNormalizationFactors(istream &fin, int32_t version, bool store, 
 // norm, unit (BP or FRAG) and resolution or binsize, and sets the file
 // position of the matrix and the normalization vectors for those chromosomes
 // at the given normalization and resolution
-bool readFooter(istream &fin, int64_t master, int32_t version, int32_t c1, int32_t c2, const string &matrixType, const string &norm,
+static bool readFooter(istream &fin, int64_t master, int32_t version, int32_t c1, int32_t c2, const string &matrixType, const string &norm,
                 const string &unit, int32_t resolution, int64_t &myFilePos,
                 indexEntry &c1NormEntry, indexEntry &c2NormEntry, vector<double> &expectedValues) {
     if (version > 8) {
@@ -442,7 +443,7 @@ bool readFooter(istream &fin, int64_t master, int32_t version, int32_t c1, int32
     return true;
 }
 
-indexEntry readIndexEntry(istream &fin) {
+static indexEntry readIndexEntry(istream &fin) {
     int64_t filePosition = readInt64FromFile(fin);
     int32_t blockSizeInBytes = readInt32FromFile(fin);
     indexEntry entry = indexEntry();
@@ -451,7 +452,7 @@ indexEntry readIndexEntry(istream &fin) {
     return entry;
 }
 
-void setValuesForMZD(istream &fin, const string &myunit, float &mySumCounts, int32_t &mybinsize, int32_t &myBlockBinCount,
+static void setValuesForMZD(istream &fin, const string &myunit, float &mySumCounts, int32_t &mybinsize, int32_t &myBlockBinCount,
                      int32_t &myBlockColumnCount, bool &found) {
     string unit;
     getline(fin, unit, '\0'); // unit
@@ -472,7 +473,7 @@ void setValuesForMZD(istream &fin, const string &myunit, float &mySumCounts, int
     }
 }
 
-void populateBlockMap(istream &fin, int32_t nBlocks, map<int32_t, indexEntry> &blockMap) {
+static void populateBlockMap(istream &fin, int32_t nBlocks, map<int32_t, indexEntry> &blockMap) {
     for (int b = 0; b < nBlocks; b++) {
         int32_t blockNumber = readInt32FromFile(fin);
         blockMap[blockNumber] = readIndexEntry(fin);
@@ -480,7 +481,7 @@ void populateBlockMap(istream &fin, int32_t nBlocks, map<int32_t, indexEntry> &b
 }
 
 // reads the raw binned contact matrix at specified resolution, setting the block bin count and block column count
-map<int32_t, indexEntry> readMatrixZoomData(istream &fin, const string &myunit, int32_t mybinsize, float &mySumCounts,
+static map<int32_t, indexEntry> readMatrixZoomData(istream &fin, const string &myunit, int32_t mybinsize, float &mySumCounts,
                                         int32_t &myBlockBinCount, int32_t &myBlockColumnCount, bool &found) {
 
     map<int32_t, indexEntry> blockMap;
@@ -496,7 +497,7 @@ map<int32_t, indexEntry> readMatrixZoomData(istream &fin, const string &myunit, 
 }
 
 // reads the raw binned contact matrix at specified resolution, setting the block bin count and block column count
-map<int32_t, indexEntry> readMatrixZoomDataHttp(CURL *curl, int64_t &myFilePosition, const string &myunit, int32_t mybinsize,
+static map<int32_t, indexEntry> readMatrixZoomDataHttp(CURL *curl, int64_t &myFilePosition, const string &myunit, int32_t mybinsize,
                                             float &mySumCounts, int32_t &myBlockBinCount, int32_t &myBlockColumnCount,
                                             bool &found) {
 
@@ -532,7 +533,7 @@ map<int32_t, indexEntry> readMatrixZoomDataHttp(CURL *curl, int64_t &myFilePosit
 
 // goes to the specified file pointer in http and finds the raw contact matrixType at specified resolution, calling readMatrixZoomData.
 // sets blockbincount and blockcolumncount
-map<int32_t, indexEntry> readMatrixHttp(CURL *curl, int64_t myFilePosition, const string &unit, int32_t resolution,
+static map<int32_t, indexEntry> readMatrixHttp(CURL *curl, int64_t myFilePosition, const string &unit, int32_t resolution,
                                     float &mySumCounts, int32_t &myBlockBinCount, int32_t &myBlockColumnCount) {
     int32_t size = sizeof(int32_t) * 3;
     char *buffer = getData(curl, myFilePosition, size);
@@ -561,7 +562,7 @@ map<int32_t, indexEntry> readMatrixHttp(CURL *curl, int64_t myFilePosition, cons
 
 // goes to the specified file pointer and finds the raw contact matrixType at specified resolution, calling readMatrixZoomData.
 // sets blockbincount and blockcolumncount
-map<int32_t, indexEntry> readMatrix(istream &fin, int64_t myFilePosition, const string &unit, int32_t resolution,
+static map<int32_t, indexEntry> readMatrix(istream &fin, int64_t myFilePosition, const string &unit, int32_t resolution,
                                 float &mySumCounts, int32_t &myBlockBinCount, int32_t &myBlockColumnCount) {
     map<int32_t, indexEntry> blockMap;
 
@@ -583,7 +584,7 @@ map<int32_t, indexEntry> readMatrix(istream &fin, int64_t myFilePosition, const 
 
 // gets the blocks that need to be read for this slice of the data.  needs blockbincount, blockcolumncount, and whether
 // or not this is intrachromosomal.
-set<int32_t> getBlockNumbersForRegionFromBinPosition(const int64_t *regionIndices, int32_t blockBinCount, int32_t blockColumnCount,
+static set<int32_t> getBlockNumbersForRegionFromBinPosition(const int64_t *regionIndices, int32_t blockBinCount, int32_t blockColumnCount,
                                                  bool intra) {
     int32_t col1, col2, row1, row2;
     col1 = static_cast<int32_t>(regionIndices[0] / blockBinCount);
@@ -611,7 +612,7 @@ set<int32_t> getBlockNumbersForRegionFromBinPosition(const int64_t *regionIndice
     return blocksSet;
 }
 
-set<int32_t> getBlockNumbersForRegionFromBinPositionV9Intra(int64_t *regionIndices, int32_t blockBinCount, int32_t blockColumnCount) {
+static set<int32_t> getBlockNumbersForRegionFromBinPositionV9Intra(int64_t *regionIndices, int32_t blockBinCount, int32_t blockColumnCount) {
     // regionIndices is binX1 binX2 binY1 binY2
     set<int32_t> blocksSet;
     int32_t translatedLowerPAD, translatedHigherPAD, translatedNearerDepth, translatedFurtherDepth;
@@ -640,7 +641,7 @@ set<int32_t> getBlockNumbersForRegionFromBinPositionV9Intra(int64_t *regionIndic
     return blocksSet;
 }
 
-void appendRecord(vector<contactRecord> &vector, int32_t index, int32_t binX, int32_t binY, float counts) {
+static void appendRecord(vector<contactRecord> &vector, int32_t index, int32_t binX, int32_t binY, float counts) {
     contactRecord record = contactRecord();
     record.binX = binX;
     record.binY = binY;
@@ -650,7 +651,7 @@ void appendRecord(vector<contactRecord> &vector, int32_t index, int32_t binX, in
 
 // this is the meat of reading the data.  takes in the block number and returns the set of contact records corresponding to
 // that block.  the block data is compressed and must be decompressed using the zlib library functions
-vector<contactRecord> readBlock(const string& fileName, indexEntry idx, int32_t version) {
+static vector<contactRecord> readBlock(const string& fileName, indexEntry idx, int32_t version) {
     if (idx.size <= 0) {
         vector<contactRecord> v;
         return v;
@@ -799,7 +800,7 @@ vector<contactRecord> readBlock(const string& fileName, indexEntry idx, int32_t 
 }
 
 // reads the normalization vector from the file at the specified location
-vector<double> readNormalizationVector(istream &bufferin, int32_t version) {
+static vector<double> readNormalizationVector(istream &bufferin, int32_t version) {
     int64_t nValues;
     if (version > 8) {
         nValues = readInt64FromFile(bufferin);
@@ -823,6 +824,41 @@ vector<double> readNormalizationVector(istream &bufferin, int32_t version) {
 
     return values;
 }
+
+static void
+populateMZDBlockMap(map<int32_t, indexEntry> blockMap, int64_t myFilePos, string &unit, int32_t resolution,
+                    float &sumCounts, int32_t &blockBinCount, int32_t &blockColumnCount, double &avgCount,
+                    int32_t numBins1, int32_t numBins2, string fileName, bool isIntra) {
+    HiCFileStream *stream2 = new HiCFileStream((fileName));
+    if (stream2->isHttp) {
+        // readMatrix will assign blockBinCount and blockColumnCount
+        blockMap = readMatrixHttp(stream2->curl, myFilePos, unit, resolution, sumCounts,
+                                  blockBinCount,
+                                  blockColumnCount);
+    } else {
+        // readMatrix will assign blockBinCount and blockColumnCount
+        blockMap = readMatrix(stream2->fin, myFilePos, unit, resolution, sumCounts,
+                              blockBinCount,
+                              blockColumnCount);
+    }
+    stream2->close();
+
+    if (!isIntra) {
+        avgCount = (sumCounts / numBins1) / numBins2;   // <= trying to avoid overflows
+    }
+}
+
+static vector<double> readNormalizationVectorFromFooter(indexEntry cNormEntry, int32_t &version, const string &fileName) {
+    char *buffer = readCompressedBytesFromFile(fileName, cNormEntry);
+    memstream bufferin(buffer, cNormEntry.size);
+    vector<double> cNorm = readNormalizationVector(bufferin, version);
+    delete buffer;
+    return cNorm;
+}
+
+static void tfunction (vector<double> &cNorm, indexEntry cNormEntry, int32_t version, string fileName) {
+    cNorm = readNormalizationVectorFromFooter(cNormEntry, version, fileName);
+};
 
 class MatrixZoomData {
 public:
@@ -897,40 +933,33 @@ public:
         }
         stream->close();
 
+        //populateMZDBlockMap(blockMap, myFilePos, unit, resolution, sumCounts, blockBinCount, blockColumnCount,
+        //                    avgCount, numBins1, numBins2, fileName, isIntra);
+
+        std::thread thread0(populateMZDBlockMap, blockMap, myFilePos, unit, resolution, sumCounts, blockBinCount, blockColumnCount,
+                       avgCount, numBins1, numBins2, fileName, isIntra);
+        thread0.join();
+
+        auto normLambda = [](vector<double> &cNorm, indexEntry cNormEntry, int32_t version, string fileName) {
+            cNorm = readNormalizationVectorFromFooter(cNormEntry, version, fileName);
+        };
+
         if (norm != "NONE") {
-            c1Norm = readNormalizationVectorFromFooter(c1NormEntry, version, fileName);
+            std::thread t1(tfunction, c1Norm, c1NormEntry, version, fileName);
+            t1.join();
+            //c1Norm = readNormalizationVectorFromFooter(c1NormEntry, version, fileName);
+            if (!isIntra) {
+                std::thread t2(tfunction, c2Norm, c2NormEntry, version, fileName);
+                //c2Norm = readNormalizationVectorFromFooter(c2NormEntry, version, fileName);
+                t2.join();
+            }
+
             if (isIntra) {
                 c2Norm = c1Norm;
-            } else {
-                c2Norm = readNormalizationVectorFromFooter(c2NormEntry, version, fileName);
             }
         }
 
-        HiCFileStream *stream2 = new HiCFileStream((fileName));
-        if (stream2->isHttp) {
-            // readMatrix will assign blockBinCount and blockColumnCount
-            blockMap = readMatrixHttp(stream2->curl, myFilePos, unit, resolution, sumCounts,
-                                      blockBinCount,
-                                      blockColumnCount);
-        } else {
-            // readMatrix will assign blockBinCount and blockColumnCount
-            blockMap = readMatrix(stream2->fin, myFilePos, unit, resolution, sumCounts,
-                                  blockBinCount,
-                                  blockColumnCount);
-        }
-        stream2->close();
 
-        if (!isIntra) {
-            avgCount = (sumCounts / numBins1) / numBins2;   // <= trying to avoid overflows
-        }
-    }
-
-    static vector<double> readNormalizationVectorFromFooter(indexEntry cNormEntry, int32_t &version, const string &fileName) {
-        char *buffer = readCompressedBytesFromFile(fileName, cNormEntry);
-        memstream bufferin(buffer, cNormEntry.size);
-        vector<double> cNorm = readNormalizationVector(bufferin, version);
-        delete buffer;
-        return cNorm;
     }
 
     vector<contactRecord> getBlockRecordsWithNormalization(int64_t origRegionIndices[4]) {
@@ -1109,7 +1138,7 @@ public:
 
 int64_t HiCFile::totalFileSize = 0LL;
 
-void parsePositions(const string &chrLoc, string &chrom, int64_t &pos1, int64_t &pos2, map<string, chromosome> map) {
+static void parsePositions(const string &chrLoc, string &chrom, int64_t &pos1, int64_t &pos2, map<string, chromosome> map) {
     string x, y;
     stringstream ss(chrLoc);
     getline(ss, chrom, ':');

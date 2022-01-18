@@ -86,15 +86,6 @@ struct MemoryStruct {
     size_t size;
 };
 
-std::map<int32_t, indexEntry>
-readMatrixZoomData(std::istream &fin, const std::string &myunit, int32_t mybinsize, float &mySumCounts,
-                   int32_t &myBlockBinCount,
-                   int32_t &myBlockColumnCount, bool &found);
-
-std::map<int32_t, indexEntry>
-readMatrix(std::istream &fin, int32_t myFilePosition, std::string unit, int32_t resolution, float &mySumCounts,
-           int32_t &myBlockBinCount, int32_t &myBlockColumnCount);
-
 std::vector<double> readNormalizationVector(std::istream &fin, indexEntry entry);
 
 std::vector<contactRecord>
