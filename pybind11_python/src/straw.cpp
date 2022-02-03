@@ -32,6 +32,8 @@
 #include <vector>
 #include <streambuf>
 #include <curl/curl.h>
+#include <iterator>
+#include <algorithm>
 #include "zlib.h"
 #include "straw.h"
 #include <pybind11/pybind11.h>
@@ -269,10 +271,46 @@ vector<int32_t> readResolutionsFromHeader(istream &fin) {
 }
 
 //https://www.techiedelight.com/get-slice-sub-vector-from-vector-cpp/
-vector<double> slice(vector<double> &v, int64_t m, int64_t n){
+vector<double> sliceVector(vector<double> &v, int64_t m, int64_t n){
     vector<double> vec;
     copy(v.begin() + m, v.begin() + n + 1, back_inserter(vec));
     return vec;
+}
+
+
+double median(vector<double> &v){
+    size_t n = v.size() / 2;
+    nth_element(v.begin(), v.begin()+n, v.end());
+    return v[n];
+}
+
+void rollingMedian(vector<double> &initialValues, vector<double> &finalResult, int32_t window) {
+    // window is actually a ~wing-span
+    if (window < 1) {
+        finalResult = initialValues;
+        return;
+    }
+
+    finalResult.push_back(initialValues[0]);
+    int64_t length = initialValues.size();
+    for (int64_t index = 1; index < length; index++) {
+        int64_t initialIndex;
+        int64_t finalIndex;
+        if (index < window){
+            initialIndex = 0;
+            finalIndex = 2*index;
+        } else {
+            initialIndex = index - window;
+            finalIndex = index + window;
+        }
+
+        if(finalIndex > length - 1){
+            finalIndex = length - 1;
+        }
+
+        vector<double> subVector = sliceVector(initialValues, initialIndex, finalIndex);
+        finalResult.push_back(median(subVector));
+    }
 }
 
 
@@ -294,11 +332,14 @@ void populateVectorWithDoubles(istream &fin, vector<double> &vector, int64_t nVa
 void readThroughExpectedVector(int32_t version, istream &fin, vector<double> &expectedValues, int64_t nValues,
                                bool store, int32_t resolution) {
     if (store) {
+        vector<double> initialExpectedValues;
         if (version > 8) {
-            populateVectorWithFloats(fin, expectedValues, nValues);
+            populateVectorWithFloats(fin, initialExpectedValues, nValues);
         } else {
-            populateVectorWithDoubles(fin, expectedValues, nValues);
+            populateVectorWithDoubles(fin, initialExpectedValues, nValues);
         }
+        int32_t window = 5000000 / resolution;
+        rollingMedian(initialExpectedValues, expectedValues, window);
     } else if (nValues > 0) {
         if (version > 8) {
             fin.seekg(nValues*sizeof(float), ios_base::cur);
@@ -307,6 +348,7 @@ void readThroughExpectedVector(int32_t version, istream &fin, vector<double> &ex
         }
     }
 }
+
 void readThroughNormalizationFactors(istream &fin, int32_t version, bool store, vector<double> &expectedValues,
                                      int32_t c1) {
     int32_t nNormalizationFactors = readInt32FromFile(fin);
@@ -956,59 +998,11 @@ public:
         return 0 <= r && r < numRows && 0 <= c && c < numCols;
     }
 
-    void fillInMatrixIfInRange(vector<vector<float>> matrix, int32_t r, int32_t c, int32_t numRows, int32_t numCols,
-                               float counts) {
-        if (isInRange(r, c, numRows, numCols)) {
-            matrix[r][c] = counts;
-        }
-    }
-
-    auto getRecordsAsMatrix(int64_t gx0, int64_t gx1, int64_t gy0, int64_t gy1){
-        cout << "It reached this line at the beginning" << endl;
-        int64_t origRegionIndices[] = {gx0, gx1, gy0, gy1};
-        vector<contactRecord> records = getRecords(gx0, gx1, gy0, gy1);
-        if (records.empty()){
-            cerr << "empty matrix" << endl;
-            auto res = vector<vector<float>>(1, vector<float>(1, 0));
-            //return py::array(py::cast(res));
-            return res;
-        }
-        int64_t regionIndices[4];
-        convertGenomeToBinPos(origRegionIndices, regionIndices, resolution);
-
-        int64_t originR = regionIndices[0];
-        int64_t endR = regionIndices[1];
-        int64_t originC = regionIndices[2];
-        int64_t endC = regionIndices[3];
-        int32_t numRows = endR - originR;
-        int32_t numCols = endC - originC;
-        vector<vector<float>> matrix = vector<vector<float>>(numRows, vector<float>(numCols, 0));
-
-        for(contactRecord cr : records) {
-            if (isnan(cr.counts) || isinf(cr.counts)) continue;
-            int32_t r = cr.binX - originR;
-            int32_t c = cr.binY - originC;
-            fillInMatrixIfInRange(matrix, r, c, numRows, numCols, cr.counts);
-            if (isIntra) {
-                r = cr.binY - originR;
-                c = cr.binX - originC;
-                fillInMatrixIfInRange(matrix, r, c, numRows, numCols, cr.counts);
-                cout << r << " " << c << " " << matrix[r][c] << endl;
-            }
-        }
-        cout << "It reached this line" << endl;
-
-        //return py::array(py::cast(matrix));
-        return matrix;
-    }
-
     set<int32_t> getBlockNumbers(int64_t *regionIndices) const {
         if (version > 8 && isIntra) {
-            return getBlockNumbersForRegionFromBinPositionV9Intra(regionIndices, blockBinCount,
-                                                                  blockColumnCount);
+            return getBlockNumbersForRegionFromBinPositionV9Intra(regionIndices, blockBinCount, blockColumnCount);
         } else {
-            return getBlockNumbersForRegionFromBinPosition(regionIndices, blockBinCount, blockColumnCount,
-                                                           isIntra);
+            return getBlockNumbersForRegionFromBinPosition(regionIndices, blockBinCount, blockColumnCount, isIntra);
         }
     }
 
@@ -1029,11 +1023,11 @@ public:
     }
 
     vector<contactRecord> getRecords(int64_t gx0, int64_t gx1, int64_t gy0, int64_t gy1) {
-        int64_t origRegionIndices[] = {gx0, gx1, gy0, gy1};
         if (!foundFooter) {
             vector<contactRecord> v;
             return v;
         }
+        int64_t origRegionIndices[] = {gx0, gx1, gy0, gy1};
         int64_t regionIndices[4];
         convertGenomeToBinPos(origRegionIndices, regionIndices, resolution);
 
@@ -1085,6 +1079,52 @@ public:
             }
         }
         return records;
+    }
+
+    auto getRecordsAsMatrix(int64_t gx0, int64_t gx1, int64_t gy0, int64_t gy1){
+        vector<contactRecord> records = this->getRecords(gx0, gx1, gy0, gy1);
+        if (records.empty()){
+            auto res = vector<vector<float>>(1, vector<float>(1, 0));
+            return py::array(py::cast(res));
+        }
+
+        int64_t origRegionIndices[] = {gx0, gx1, gy0, gy1};
+        int64_t regionIndices[4];
+        convertGenomeToBinPos(origRegionIndices, regionIndices, resolution);
+
+        int64_t originR = regionIndices[0];
+        int64_t endR = regionIndices[1];
+        int64_t originC = regionIndices[2];
+        int64_t endC = regionIndices[3];
+        int32_t numRows = endR - originR + 1;
+        int32_t numCols = endC - originC + 1;
+        float matrix[numRows][numCols];
+
+        for(contactRecord cr : records) {
+            if (isnan(cr.counts) || isinf(cr.counts)) continue;
+            int32_t r = cr.binX/resolution - originR;
+            int32_t c = cr.binY/resolution - originC;
+            if (isInRange(r, c, numRows, numCols)) {
+                matrix[r][c] = cr.counts;
+            }
+            if (isIntra) {
+                r = cr.binY/resolution - originR;
+                c = cr.binX/resolution - originC;
+                if (isInRange(r, c, numRows, numCols)) {
+                    matrix[r][c] = cr.counts;
+                }
+            }
+        }
+
+        vector<vector<float>> finalMatrix;
+        for(int32_t i = 0; i < numRows; i++){
+            vector<float> row;
+            for(int32_t j = 0; j < numCols; j++){
+                row.push_back(matrix[i][j]);
+            }
+            finalMatrix.push_back(row);
+        }
+        return py::array(py::cast(finalMatrix));
     }
 };
 
