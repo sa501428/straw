@@ -23,6 +23,8 @@
 */
 #include <iostream>
 #include <string>
+#include <algorithm>  // for transform
+#include <cctype>    // for tolower
 #include "straw.h"
 #include "hic_slice.h"
 using namespace std;
