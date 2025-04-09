@@ -43,7 +43,7 @@ A C++ reader is provided in the slice_reader directory. It provides methods to:
 The reader automatically handles the chromosome ordering convention.
 
 ## Notes:
-The simplified slice format and reader is only intended for repeated analysis on a high resolution slice of the matrix. Otherwise, the original hic file format is more efficient.
+The simplified slice format is only intended for repeated analysis on a high resolution slice of the matrix. Otherwise, the original hic file format is more efficient.
 
 ## Bug Reports or Feature Requests:
 For bug reports or feature requests, please open an issue on the repository.

@@ -31,9 +31,9 @@ int main(int argc, char *argv[])
 {
     // Check if this is a dump command
     if (argc > 1 && string(argv[1]) == "dump") {
-        if (argc != 8) {
+        if (argc != 8 && argc != 9) {
             cerr << "Incorrect arguments for dump command" << endl;
-            cerr << "Usage: straw dump <observed/oe/expected> <NONE/VC/VC_SQRT/KR> <hicFile> <BP/FRAG> <binsize> <outputFile>" << endl;
+            cerr << "Usage: straw dump <observed/oe/expected> <NONE/VC/VC_SQRT/KR> <hicFile> <BP/FRAG> <binsize> <outputFile> [compressed=true]" << endl;
             exit(1);
         }
         string matrixType = argv[2];
@@ -42,8 +42,12 @@ int main(int argc, char *argv[])
         string unit = argv[5];
         int32_t binsize = stoi(argv[6]);
         string outputPath = argv[7];
+        bool compressed = true;  // Default to compressed
+        if (argc == 9) {
+            compressed = (string(argv[8]) == "1" || string(argv[8]) == "true");
+        }
 
-        dumpGenomeWideDataAtResolution(matrixType, norm, fname, unit, binsize, outputPath);
+        dumpGenomeWideDataAtResolution(matrixType, norm, fname, unit, binsize, outputPath, compressed);
         return 0;
     }
 

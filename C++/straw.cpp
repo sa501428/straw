@@ -1757,38 +1757,36 @@ int64_t getNumRecordsForChromosomes(const string &fileName, int32_t binsize, boo
     return 0;
 }
 
-// Add these implementations to straw.cpp (near the end of the file)
-
 void writeCompressedBuffer(gzFile& file, const char* buffer, size_t size) {
     gzwrite(file, buffer, size);
 }
 
-void writeHeader(gzFile& file, const HicSliceHeader& header) {
-    // Write magic string
-    writeCompressedBuffer(file, HICSLICE_MAGIC.c_str(), HICSLICE_MAGIC.length());
-    
-    // Write resolution
-    writeCompressedBuffer(file, (char*)&header.resolution, sizeof(int32_t));
-    
-    // Write number of chromosomes
-    writeCompressedBuffer(file, (char*)&header.numChromosomes, sizeof(int32_t));
-    
-    // Write chromosome mapping
+void writeContactRecord(FILE* file, const CompressedContactRecord& record) {
+    fwrite(&record, sizeof(CompressedContactRecord), 1, file);
+}
+
+void writeCompressedHeader(gzFile& file, const HicSliceHeader& header) {
+    gzwrite(file, HICSLICE_MAGIC.c_str(), HICSLICE_MAGIC.length());
+    gzwrite(file, (char*)&header.resolution, sizeof(int32_t));
+    gzwrite(file, (char*)&header.numChromosomes, sizeof(int32_t));
     for (const auto& chr : header.chromosomeKeys) {
-        // Write chromosome name length
         int32_t nameLength = chr.first.length();
-        writeCompressedBuffer(file, (char*)&nameLength, sizeof(int32_t));
-        
-        // Write chromosome name
-        writeCompressedBuffer(file, chr.first.c_str(), nameLength);
-        
-        // Write chromosome key
-        writeCompressedBuffer(file, (char*)&chr.second, sizeof(int16_t));
+        gzwrite(file, (char*)&nameLength, sizeof(int32_t));
+        gzwrite(file, chr.first.c_str(), nameLength);
+        gzwrite(file, (char*)&chr.second, sizeof(int16_t));
     }
 }
 
-void writeContactRecord(gzFile& file, const CompressedContactRecord& record) {
-    writeCompressedBuffer(file, (char*)&record, sizeof(CompressedContactRecord));
+void writeUncompressedHeader(FILE* file, const HicSliceHeader& header) {
+    fwrite(HICSLICE_MAGIC.c_str(), 1, HICSLICE_MAGIC.length(), file);
+    fwrite(&header.resolution, sizeof(int32_t), 1, file);
+    fwrite(&header.numChromosomes, sizeof(int32_t), 1, file);
+    for (const auto& chr : header.chromosomeKeys) {
+        int32_t nameLength = chr.first.length();
+        fwrite(&nameLength, sizeof(int32_t), 1, file);
+        fwrite(chr.first.c_str(), 1, nameLength, file);
+        fwrite(&chr.second, sizeof(int16_t), 1, file);
+    }
 }
 
 void dumpGenomeWideDataAtResolution(const std::string& matrixType,
@@ -1796,7 +1794,8 @@ void dumpGenomeWideDataAtResolution(const std::string& matrixType,
                                   const std::string& filePath,
                                   const std::string& unit,
                                   int32_t resolution,
-                                  const std::string& outputPath) {
+                                  const std::string& outputPath,
+                                  bool compressed) {
     // Open HiC file
     HiCFile* hicFile = new HiCFile(filePath);
     
@@ -1808,71 +1807,111 @@ void dumpGenomeWideDataAtResolution(const std::string& matrixType,
     std::vector<chromosome> chromosomes = hicFile->getChromosomes();
     int16_t chrKey = 0;
     for (const auto& chr : chromosomes) {
-        if (chr.index > 0) {  // Skip chromosomes with index <= 0
+        if (chr.index > 0) {
             header.chromosomeKeys[chr.name] = chrKey++;
         }
     }
     header.numChromosomes = header.chromosomeKeys.size();
     
-    // Open output file
-    gzFile outFile = gzopen(outputPath.c_str(), "wb");
-    if (!outFile) {
-        std::cerr << "Error: Could not open output file " << outputPath << std::endl;
-        return;
-    }
-    
-    // Write header
-    writeHeader(outFile, header);
-    
-    // Process each chromosome pair
-    for (const auto& chr1 : chromosomes) {
-        if (chr1.index <= 0) continue;
+    if (compressed) {
+        // Open compressed file
+        gzFile outFile = gzopen(outputPath.c_str(), "wb");
+        if (!outFile) {
+            std::cerr << "Error: Could not open compressed output file " << outputPath << std::endl;
+            return;
+        }
         
-        for (const auto& chr2 : chromosomes) {
-            if (chr2.index <= 0 || chr2.index < chr1.index) continue;
+        // Write compressed header
+        writeCompressedHeader(outFile, header);
+        
+        // Process chromosome pairs
+        for (const auto& chr1 : chromosomes) {
+            if (chr1.index <= 0) continue;
             
-            try {
-                MatrixZoomData* mzd = hicFile->getMatrixZoomData(
-                    chr1.name, chr2.name, matrixType, norm, unit, resolution
-                );
+            for (const auto& chr2 : chromosomes) {
+                if (chr2.index <= 0 || chr1.index > chr2.index) continue;
                 
-                if (mzd && mzd->foundFooter) {
-                    // Process each block in the blockMap
-                    for (const auto& blockMapEntry : mzd->blockMap) {
-                        // Directly read and write records
-                        vector<contactRecord> records = readBlock(mzd->fileName, blockMapEntry.second, mzd->version);
-                        
-                        for (const contactRecord& rec : records) {
-                            // Only write records with valid, positive counts
-                            if (rec.counts > 0 && !isnan(rec.counts) && !isinf(rec.counts)) {
-                                CompressedContactRecord compressedRecord;
-                                compressedRecord.chr1Key = header.chromosomeKeys[chr1.name];
-                                compressedRecord.binX = rec.binX;
-                                compressedRecord.chr2Key = header.chromosomeKeys[chr2.name];
-                                compressedRecord.binY = rec.binY;
-                                compressedRecord.value = rec.counts;
-                                
-                                writeContactRecord(outFile, compressedRecord);
+                try {
+                    MatrixZoomData* mzd = hicFile->getMatrixZoomData(
+                        chr1.name, chr2.name, matrixType, norm, unit, resolution
+                    );
+                    
+                    if (mzd && mzd->foundFooter) {
+                        for (const auto& blockMapEntry : mzd->blockMap) {
+                            vector<contactRecord> records = readBlock(mzd->fileName, blockMapEntry.second, mzd->version);
+                            
+                            for (const contactRecord& rec : records) {
+                                if (rec.counts > 0 && !isnan(rec.counts) && !isinf(rec.counts)) {
+                                    CompressedContactRecord compressedRecord;
+                                    compressedRecord.chr1Key = header.chromosomeKeys[chr1.name];
+                                    compressedRecord.binX = rec.binX;
+                                    compressedRecord.chr2Key = header.chromosomeKeys[chr2.name];
+                                    compressedRecord.binY = rec.binY;
+                                    compressedRecord.value = rec.counts;
+                                    
+                                    gzwrite(outFile, (char*)&compressedRecord, sizeof(CompressedContactRecord));
+                                }
                             }
                         }
                     }
+                    delete mzd;
+                } catch (const std::exception& e) {
+                    std::cerr << "Skipping chromosome pair " << chr1.name << "-" << chr2.name 
+                             << ": " << e.what() << std::endl;
                 }
-                delete mzd;
-            } catch (const std::exception& e) {
-                std::cerr << "Skipping chromosome pair " << chr1.name << "-" << chr2.name 
-                         << " (indices " << chr1.index << "-" << chr2.index 
-                         << "): " << e.what() << std::endl;
-                continue;
-            } catch (...) {
-                std::cerr << "Skipping chromosome pair " << chr1.name << "-" << chr2.name 
-                         << " (indices " << chr1.index << "-" << chr2.index 
-                         << "): Unknown error" << std::endl;
-                continue;
             }
         }
+        gzclose(outFile);
+    } else {
+        // Open uncompressed file
+        FILE* outFile = fopen(outputPath.c_str(), "wb");
+        if (!outFile) {
+            std::cerr << "Error: Could not open uncompressed output file " << outputPath << std::endl;
+            return;
+        }
+        
+        // Write uncompressed header
+        writeUncompressedHeader(outFile, header);
+        
+        // Process chromosome pairs (same loop but with uncompressed writes)
+        for (const auto& chr1 : chromosomes) {
+            if (chr1.index <= 0) continue;
+            
+            for (const auto& chr2 : chromosomes) {
+                if (chr2.index <= 0 || chr1.index > chr2.index) continue;
+                
+                try {
+                    MatrixZoomData* mzd = hicFile->getMatrixZoomData(
+                        chr1.name, chr2.name, matrixType, norm, unit, resolution
+                    );
+                    
+                    if (mzd && mzd->foundFooter) {
+                        for (const auto& blockMapEntry : mzd->blockMap) {
+                            vector<contactRecord> records = readBlock(mzd->fileName, blockMapEntry.second, mzd->version);
+                            
+                            for (const contactRecord& rec : records) {
+                                if (rec.counts > 0 && !isnan(rec.counts) && !isinf(rec.counts)) {
+                                    CompressedContactRecord compressedRecord;
+                                    compressedRecord.chr1Key = header.chromosomeKeys[chr1.name];
+                                    compressedRecord.binX = rec.binX;
+                                    compressedRecord.chr2Key = header.chromosomeKeys[chr2.name];
+                                    compressedRecord.binY = rec.binY;
+                                    compressedRecord.value = rec.counts;
+                                    
+                                    fwrite(&compressedRecord, sizeof(CompressedContactRecord), 1, outFile);
+                                }
+                            }
+                        }
+                    }
+                    delete mzd;
+                } catch (const std::exception& e) {
+                    std::cerr << "Skipping chromosome pair " << chr1.name << "-" << chr2.name 
+                             << ": " << e.what() << std::endl;
+                }
+            }
+        }
+        fclose(outFile);
     }
     
-    // Close files and cleanup
-    gzclose(outFile);
     delete hicFile;
 }

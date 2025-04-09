@@ -16,7 +16,7 @@ struct HicSliceHeader {
     std::map<std::string, int16_t> chromosomeKeys;
 };
 
-// Record structure for compressed storage
+// Record structure for storage
 struct CompressedContactRecord {
     int16_t chr1Key;
     int32_t binX;
@@ -30,6 +30,7 @@ void dumpGenomeWideDataAtResolution(const std::string& matrixType,
                                   const std::string& filePath, 
                                   const std::string& unit, 
                                   int32_t resolution, 
-                                  const std::string& outputPath);
+                                  const std::string& outputPath,
+                                  bool compressed = true);  // Default to compressed
 
 #endif 
