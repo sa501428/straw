@@ -1789,13 +1789,43 @@ void writeUncompressedHeader(FILE* file, const HicSliceHeader& header) {
     }
 }
 
+bool shouldKeepRecord(const contactRecord& rec, const chromosome& chr1, const chromosome& chr2, 
+                     int32_t resolution, ContactFilter filter) {
+    const int32_t FIVE_MB = 5000000;
+    
+    if (filter == ContactFilter::ALL) {
+        return true;
+    }
+    
+    if (filter == ContactFilter::INTER) {
+        return chr1.name != chr2.name;
+    }
+    
+    // For both INTRA cases, first check if same chromosome
+    if (chr1.name == chr2.name) {
+        if (filter == ContactFilter::INTRA) {
+            return true;
+        }
+
+        int32_t distance = abs(rec.binX - rec.binY);
+        if (filter == ContactFilter::INTRA_SHORT) {
+            return distance < FIVE_MB/resolution;
+        } else { // INTRA_LONG
+            return distance > FIVE_MB/resolution;
+        }
+    }
+    
+    return false;  // Different chromosomes for INTRA cases
+}
+
 void dumpGenomeWideDataAtResolution(const std::string& matrixType,
                                   const std::string& norm,
                                   const std::string& filePath,
                                   const std::string& unit,
                                   int32_t resolution,
                                   const std::string& outputPath,
-                                  bool compressed) {
+                                  bool compressed,
+                                  ContactFilter filter) {
     // Open HiC file
     HiCFile* hicFile = new HiCFile(filePath);
     
@@ -1831,6 +1861,11 @@ void dumpGenomeWideDataAtResolution(const std::string& matrixType,
             for (const auto& chr2 : chromosomes) {
                 if (chr2.index <= 0 || chr1.index > chr2.index) continue;
                 
+                // Skip chromosome pairs that don't match filter
+                if (filter == ContactFilter::INTER && chr1.name == chr2.name) continue;
+                if ((filter == ContactFilter::INTRA_SHORT || filter == ContactFilter::INTRA_LONG  || filter == ContactFilter::INTRA) 
+                    && chr1.name != chr2.name) continue;
+                
                 try {
                     MatrixZoomData* mzd = hicFile->getMatrixZoomData(
                         chr1.name, chr2.name, matrixType, norm, unit, resolution
@@ -1841,7 +1876,9 @@ void dumpGenomeWideDataAtResolution(const std::string& matrixType,
                             vector<contactRecord> records = readBlock(mzd->fileName, blockMapEntry.second, mzd->version);
                             
                             for (const contactRecord& rec : records) {
-                                if (rec.counts > 0 && !isnan(rec.counts) && !isinf(rec.counts)) {
+                                if (rec.counts > 0 && !isnan(rec.counts) && !isinf(rec.counts) &&
+                                    shouldKeepRecord(rec, chr1, chr2, resolution, filter)) {
+                                    
                                     CompressedContactRecord compressedRecord;
                                     compressedRecord.chr1Key = header.chromosomeKeys[chr1.name];
                                     compressedRecord.binX = rec.binX;
@@ -1880,6 +1917,11 @@ void dumpGenomeWideDataAtResolution(const std::string& matrixType,
             for (const auto& chr2 : chromosomes) {
                 if (chr2.index <= 0 || chr1.index > chr2.index) continue;
                 
+                // Skip chromosome pairs that don't match filter
+                if (filter == ContactFilter::INTER && chr1.name == chr2.name) continue;
+                if ((filter == ContactFilter::INTRA_SHORT || filter == ContactFilter::INTRA_LONG || filter == ContactFilter::INTRA) 
+                    && chr1.name != chr2.name) continue;
+                
                 try {
                     MatrixZoomData* mzd = hicFile->getMatrixZoomData(
                         chr1.name, chr2.name, matrixType, norm, unit, resolution
@@ -1890,7 +1932,9 @@ void dumpGenomeWideDataAtResolution(const std::string& matrixType,
                             vector<contactRecord> records = readBlock(mzd->fileName, blockMapEntry.second, mzd->version);
                             
                             for (const contactRecord& rec : records) {
-                                if (rec.counts > 0 && !isnan(rec.counts) && !isinf(rec.counts)) {
+                                if (rec.counts > 0 && !isnan(rec.counts) && !isinf(rec.counts) &&
+                                    shouldKeepRecord(rec, chr1, chr2, resolution, filter)) {
+                                    
                                     CompressedContactRecord compressedRecord;
                                     compressedRecord.chr1Key = header.chromosomeKeys[chr1.name];
                                     compressedRecord.binX = rec.binX;

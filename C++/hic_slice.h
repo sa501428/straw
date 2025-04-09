@@ -25,12 +25,22 @@ struct CompressedContactRecord {
     float value;
 };
 
+// Filter type for contact records
+enum class ContactFilter {
+    ALL,           // Default: save all records
+    INTRA_SHORT,   // Only intra-chromosomal records within 5Mb
+    INTRA_LONG,    // Only intra-chromosomal records beyond 5Mb
+    INTER,         // Only inter-chromosomal records
+    INTRA          // All intra-chromosomal records
+};
+
 void dumpGenomeWideDataAtResolution(const std::string& matrixType, 
                                   const std::string& norm, 
                                   const std::string& filePath, 
                                   const std::string& unit, 
                                   int32_t resolution, 
                                   const std::string& outputPath,
-                                  bool compressed = true);  // Default to compressed
+                                  bool compressed = true,
+                                  ContactFilter filter = ContactFilter::ALL);
 
 #endif 

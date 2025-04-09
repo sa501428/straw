@@ -27,13 +27,22 @@
 #include "hic_slice.h"
 using namespace std;
 
+// Helper function to check argument strings
+bool containsIgnoreCase(const string& str, const string& substr) {
+    string strLower = str;
+    string substrLower = substr;
+    transform(strLower.begin(), strLower.end(), strLower.begin(), ::tolower);
+    transform(substrLower.begin(), substrLower.end(), substrLower.begin(), ::tolower);
+    return strLower.find(substrLower) != string::npos;
+}
+
 int main(int argc, char *argv[])
 {
     // Check if this is a dump command
     if (argc > 1 && string(argv[1]) == "dump") {
-        if (argc != 8 && argc != 9) {
+        if (argc < 9 || argc > 10) {
             cerr << "Incorrect arguments for dump command" << endl;
-            cerr << "Usage: straw dump <observed/oe/expected> <NONE/VC/VC_SQRT/KR> <hicFile> <BP/FRAG> <binsize> <outputFile> [compressed=true]" << endl;
+            cerr << "Usage: straw dump <observed/oe/expected> <NONE/VC/VC_SQRT/KR> <hicFile> <BP/FRAG> <binsize> <outputFile> <compressed> [-intra-short|-intra-long|-inter|-intra]" << endl;
             exit(1);
         }
         string matrixType = argv[2];
@@ -42,12 +51,26 @@ int main(int argc, char *argv[])
         string unit = argv[5];
         int32_t binsize = stoi(argv[6]);
         string outputPath = argv[7];
-        bool compressed = true;  // Default to compressed
-        if (argc == 9) {
-            compressed = (string(argv[8]) == "1" || string(argv[8]) == "true");
+        bool compressed = (string(argv[8]) == "1" || string(argv[8]) == "true" || string(argv[8]) == "compressed");
+        ContactFilter filter = ContactFilter::ALL;
+        
+        // Parse optional filter argument more flexibly
+        if (argc == 10) {
+            string arg = argv[9];
+            if (containsIgnoreCase(arg, "inter")) {
+                filter = ContactFilter::INTER;
+            } else if (containsIgnoreCase(arg, "intra")) {
+                if (containsIgnoreCase(arg, "short")) {
+                    filter = ContactFilter::INTRA_SHORT;
+                } else if (containsIgnoreCase(arg, "long")) {
+                    filter = ContactFilter::INTRA_LONG;
+                } else {
+                    filter = ContactFilter::INTRA;
+                }
+            }
         }
 
-        dumpGenomeWideDataAtResolution(matrixType, norm, fname, unit, binsize, outputPath, compressed);
+        dumpGenomeWideDataAtResolution(matrixType, norm, fname, unit, binsize, outputPath, compressed, filter);
         return 0;
     }
 
