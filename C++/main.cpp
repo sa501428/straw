@@ -75,12 +75,49 @@ int main(int argc, char *argv[])
         dumpGenomeWideDataAtResolution(matrixType, norm, fname, unit, binsize, outputPath, compressed, filter);
         return 0;
     }
+    
+    // Check if this is a dump_norm command
+    if (argc > 1 && string(argv[1]) == "dump_norm") {
+        if (argc != 7) {
+            cerr << "Incorrect arguments for dump_norm command" << endl;
+            cerr << "Usage: straw dump_norm <hicFile> <chr> <norm> <unit> <resolution> <outputFile>" << endl;
+            exit(1);
+        }
+        string fname = argv[2];
+        string chr = argv[3];
+        string norm = argv[4];
+        string unit = argv[5];
+        int32_t resolution = stoi(argv[6]);
+        string outputFile = argv[7];
+        
+        dumpNormalizationVector(fname, chr, norm, unit, resolution, outputFile);
+        return 0;
+    }
+    
+    // Check if this is a dump_all_norm command
+    if (argc > 1 && string(argv[1]) == "dump_all_norm") {
+        if (argc != 6) {
+            cerr << "Incorrect arguments for dump_all_norm command" << endl;
+            cerr << "Usage: straw dump_all_norm <hicFile> <norm> <unit> <resolution> <outputDir>" << endl;
+            exit(1);
+        }
+        string fname = argv[2];
+        string norm = argv[3];
+        string unit = argv[4];
+        int32_t resolution = stoi(argv[5]);
+        string outputDir = argv[6];
+        
+        dumpAllNormalizationVectors(fname, norm, unit, resolution, outputDir);
+        return 0;
+    }
 
     // Original functionality
     if (argc != 7 && argc != 8) {
         cerr << "Incorrect arguments" << endl;
         cerr << "Usage: straw [observed/oe/expected] <NONE/VC/VC_SQRT/KR> <hicFile(s)> <chr1>[:x1:x2] <chr2>[:y1:y2] <BP/FRAG/MATRIX> <binsize>" << endl;
-        cerr << "   or: straw dump <observed/oe/expected> <NONE/VC/VC_SQRT/KR> <hicFile> <BP/FRAG> <binsize> <outputFile>" << endl;
+        cerr << "   or: straw dump <observed/oe/expected> <NONE/VC/VC_SQRT/KR> <hicFile> <BP/FRAG> <binsize> <outputFile> <compressed> [-intra-short|-intra-long|-inter|-intra]" << endl;
+        cerr << "   or: straw dump_norm <hicFile> <chr> <norm> <unit> <resolution> <outputFile>" << endl;
+        cerr << "   or: straw dump_all_norm <hicFile> <norm> <unit> <resolution> <outputDir>" << endl;
         exit(1);
     }
     int offset = 0;

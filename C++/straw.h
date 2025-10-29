@@ -106,4 +106,10 @@ int64_t getNumRecordsForFile(const std::string& filename, int32_t binsize, bool 
 
 int64_t getNumRecordsForChromosomes(const std::string& filename, int32_t binsize, bool interOnly);
 
+void dumpNormalizationVector(const std::string& fileName, const std::string& chr, const std::string& norm, 
+                           const std::string& unit, int32_t resolution, const std::string& outputPath);
+
+void dumpAllNormalizationVectors(const std::string& fileName, const std::string& norm, const std::string& unit, 
+                               int32_t resolution, const std::string& outputDir);
+
 #endif

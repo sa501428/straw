@@ -42,8 +42,10 @@
 #include <queue>
 #include <condition_variable>
 #include "hic_slice.h"
+#include <filesystem>
 
 using namespace std;
+namespace fs = std::filesystem;
 
 /*
   Straw: fast C++ implementation of dump. Not as fully featured as the
@@ -1955,6 +1957,128 @@ void dumpGenomeWideDataAtResolution(const std::string& matrixType,
             }
         }
         fclose(outFile);
+    }
+    
+    delete hicFile;
+}
+
+void dumpNormalizationVector(const string& fileName, 
+                           const string& chr, 
+                           const string& norm, 
+                           const string& unit, 
+                           int32_t resolution,
+                           const string& outputPath) {
+    // Open HiC file
+    HiCFile* hicFile = new HiCFile(fileName);
+    
+    // Get chromosome info
+    if (hicFile->chromosomeMap.find(chr) == hicFile->chromosomeMap.end()) {
+        cerr << "Error: Chromosome " << chr << " not found in file" << endl;
+        delete hicFile;
+        return;
+    }
+    
+    chromosome chrom = hicFile->chromosomeMap[chr];
+    
+    // Get matrix zoom data to access normalization vectors
+    MatrixZoomData* mzd = hicFile->getMatrixZoomData(chr, chr, "observed", norm, unit, resolution);
+    
+    if (!mzd->foundFooter) {
+        cerr << "Error: Could not find footer for chromosome " << chr << endl;
+        delete mzd;
+        delete hicFile;
+        return;
+    }
+    
+    // Get normalization vector
+    vector<double> normVector = mzd->getNormVector(chrom.index);
+    
+    // Open output file
+    ofstream outFile(outputPath);
+    if (!outFile.is_open()) {
+        cerr << "Error: Could not open output file " << outputPath << endl;
+        delete mzd;
+        delete hicFile;
+        return;
+    }
+    
+    // Write header
+    outFile << "# Chromosome: " << chr << endl;
+    outFile << "# Normalization: " << norm << endl;
+    outFile << "# Unit: " << unit << endl;
+    outFile << "# Resolution: " << resolution << endl;
+    outFile << "# Format: bin_position value" << endl;
+    
+    // Write data
+    for (size_t i = 0; i < normVector.size(); i++) {
+        int64_t position = i * resolution;
+        outFile << position << "\t" << normVector[i] << endl;
+    }
+    
+    outFile.close();
+    delete mzd;
+    delete hicFile;
+}
+
+void dumpAllNormalizationVectors(const string& fileName, 
+                               const string& norm, 
+                               const string& unit, 
+                               int32_t resolution,
+                               const string& outputDir) {
+    // Open HiC file
+    HiCFile* hicFile = new HiCFile(fileName);
+    
+    // Get all chromosomes
+    vector<chromosome> chromosomes = hicFile->getChromosomes();
+    
+    // Create output directory if it doesn't exist
+    system(("mkdir -p " + outputDir).c_str());
+    
+    // Process each chromosome
+    for (const auto& chrom : chromosomes) {
+        if (chrom.index <= 0) continue; // Skip non-standard chromosomes
+        
+        // Create output filename
+        string outputPath = outputDir + "/" + chrom.name + "_" + norm + "_" + unit + "_" + 
+                          to_string(resolution) + ".txt";
+        
+        // Get matrix zoom data to access normalization vectors
+        MatrixZoomData* mzd = hicFile->getMatrixZoomData(chrom.name, chrom.name, "observed", norm, unit, resolution);
+        
+        if (!mzd->foundFooter) {
+            cerr << "Warning: Could not find footer for chromosome " << chrom.name << ", skipping..." << endl;
+            delete mzd;
+            continue;
+        }
+        
+        // Get normalization vector
+        vector<double> normVector = mzd->getNormVector(chrom.index);
+        
+        // Open output file
+        ofstream outFile(outputPath);
+        if (!outFile.is_open()) {
+            cerr << "Error: Could not open output file " << outputPath << endl;
+            delete mzd;
+            continue;
+        }
+        
+        // Write header
+        outFile << "# Chromosome: " << chrom.name << endl;
+        outFile << "# Normalization: " << norm << endl;
+        outFile << "# Unit: " << unit << endl;
+        outFile << "# Resolution: " << resolution << endl;
+        outFile << "# Format: bin_position value" << endl;
+        
+        // Write data
+        for (size_t i = 0; i < normVector.size(); i++) {
+            int64_t position = i * resolution;
+            outFile << position << "\t" << normVector[i] << endl;
+        }
+        
+        outFile.close();
+        delete mzd;
+        
+        cout << "Processed chromosome " << chrom.name << endl;
     }
     
     delete hicFile;
