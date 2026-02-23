@@ -35,6 +35,7 @@
 #include <iterator>
 #include <algorithm>
 #include "zlib.h"
+#include "zstd.h"
 #include "straw.h"
 #include <thread>
 #include <mutex>
@@ -973,7 +974,26 @@ void appendRecord(vector<contactRecord> &vector, int32_t index, int32_t binX, in
     vector[index] = record;
 }
 
+// Auto-detect zstd vs zlib from magic bytes: zstd frames start with 0xFD 0x2F 0xB5 0x28
+static bool isZstdCompressed(const char *data, int32_t size) {
+    return size >= 4 &&
+           (unsigned char)data[0] == 0xFD &&
+           (unsigned char)data[1] == 0x2F &&
+           (unsigned char)data[2] == 0xB5 &&
+           (unsigned char)data[3] == 0x28;
+}
+
 int32_t decompressBlock(indexEntry idx, char *compressedBytes, char *uncompressedBytes) {
+    if (isZstdCompressed(compressedBytes, idx.size)) {
+        size_t const dstCapacity = static_cast<size_t>(idx.size) * 10;
+        size_t const result = ZSTD_decompress(uncompressedBytes, dstCapacity,
+                                               compressedBytes, static_cast<size_t>(idx.size));
+        if (ZSTD_isError(result)) {
+            cerr << "zstd decompression error: " << ZSTD_getErrorName(result) << endl;
+            return 0;
+        }
+        return static_cast<int32_t>(result);
+    }
     z_stream infstream;
     infstream.zalloc = Z_NULL;
     infstream.zfree = Z_NULL;
@@ -1044,6 +1064,14 @@ vector<contactRecord> readBlock(const string &fileName, indexEntry idx, int32_t 
         }
 
         char type = readCharFromFile(bufferin);
+
+        bool allCountsOne = false;
+        bool useDeltaColumn = false;
+        if (version > 9) {
+            allCountsOne  = readCharFromFile(bufferin) != 0;
+            useDeltaColumn = readCharFromFile(bufferin) != 0;
+        }
+
         int32_t index = 0;
         if (type == 1) {
             if (useShortBinX && useShortBinY) {
@@ -1051,13 +1079,14 @@ vector<contactRecord> readBlock(const string &fileName, indexEntry idx, int32_t 
                 for (int i = 0; i < rowCount; i++) {
                     int32_t binY = binYOffset + readInt16FromFile(bufferin);
                     int16_t colCount = readInt16FromFile(bufferin);
+                    int32_t prevColVal = 0;
                     for (int j = 0; j < colCount; j++) {
-                        int32_t binX = binXOffset + readInt16FromFile(bufferin);
-                        float counts;
-                        if (useShort) {
-                            counts = readInt16FromFile(bufferin);
-                        } else {
-                            counts = readFloatFromFile(bufferin);
+                        int32_t colVal = (int32_t)readInt16FromFile(bufferin);
+                        if (useDeltaColumn) prevColVal += colVal; else prevColVal = colVal;
+                        int32_t binX = binXOffset + prevColVal;
+                        float counts = 1.0f;
+                        if (!allCountsOne) {
+                            counts = useShort ? (float)readInt16FromFile(bufferin) : readFloatFromFile(bufferin);
                         }
                         appendRecord(v, index++, binX, binY, counts);
                     }
@@ -1067,13 +1096,14 @@ vector<contactRecord> readBlock(const string &fileName, indexEntry idx, int32_t 
                 for (int i = 0; i < rowCount; i++) {
                     int32_t binY = binYOffset + readInt32FromFile(bufferin);
                     int16_t colCount = readInt16FromFile(bufferin);
+                    int32_t prevColVal = 0;
                     for (int j = 0; j < colCount; j++) {
-                        int32_t binX = binXOffset + readInt16FromFile(bufferin);
-                        float counts;
-                        if (useShort) {
-                            counts = readInt16FromFile(bufferin);
-                        } else {
-                            counts = readFloatFromFile(bufferin);
+                        int32_t colVal = (int32_t)readInt16FromFile(bufferin);
+                        if (useDeltaColumn) prevColVal += colVal; else prevColVal = colVal;
+                        int32_t binX = binXOffset + prevColVal;
+                        float counts = 1.0f;
+                        if (!allCountsOne) {
+                            counts = useShort ? (float)readInt16FromFile(bufferin) : readFloatFromFile(bufferin);
                         }
                         appendRecord(v, index++, binX, binY, counts);
                     }
@@ -1083,13 +1113,14 @@ vector<contactRecord> readBlock(const string &fileName, indexEntry idx, int32_t 
                 for (int i = 0; i < rowCount; i++) {
                     int32_t binY = binYOffset + readInt16FromFile(bufferin);
                     int32_t colCount = readInt32FromFile(bufferin);
+                    int32_t prevColVal = 0;
                     for (int j = 0; j < colCount; j++) {
-                        int32_t binX = binXOffset + readInt32FromFile(bufferin);
-                        float counts;
-                        if (useShort) {
-                            counts = readInt16FromFile(bufferin);
-                        } else {
-                            counts = readFloatFromFile(bufferin);
+                        int32_t colVal = readInt32FromFile(bufferin);
+                        if (useDeltaColumn) prevColVal += colVal; else prevColVal = colVal;
+                        int32_t binX = binXOffset + prevColVal;
+                        float counts = 1.0f;
+                        if (!allCountsOne) {
+                            counts = useShort ? (float)readInt16FromFile(bufferin) : readFloatFromFile(bufferin);
                         }
                         appendRecord(v, index++, binX, binY, counts);
                     }
@@ -1099,13 +1130,14 @@ vector<contactRecord> readBlock(const string &fileName, indexEntry idx, int32_t 
                 for (int i = 0; i < rowCount; i++) {
                     int32_t binY = binYOffset + readInt32FromFile(bufferin);
                     int32_t colCount = readInt32FromFile(bufferin);
+                    int32_t prevColVal = 0;
                     for (int j = 0; j < colCount; j++) {
-                        int32_t binX = binXOffset + readInt32FromFile(bufferin);
-                        float counts;
-                        if (useShort) {
-                            counts = readInt16FromFile(bufferin);
-                        } else {
-                            counts = readFloatFromFile(bufferin);
+                        int32_t colVal = readInt32FromFile(bufferin);
+                        if (useDeltaColumn) prevColVal += colVal; else prevColVal = colVal;
+                        int32_t binX = binXOffset + prevColVal;
+                        float counts = 1.0f;
+                        if (!allCountsOne) {
+                            counts = useShort ? (float)readInt16FromFile(bufferin) : readFloatFromFile(bufferin);
                         }
                         appendRecord(v, index++, binX, binY, counts);
                     }
