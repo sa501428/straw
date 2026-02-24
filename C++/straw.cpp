@@ -1991,3 +1991,43 @@ void dumpGenomeWideDataAtResolution(const std::string& matrixType,
     
     delete hicFile;
 }
+
+void dumpAllAsText(const std::string& filePath, int32_t resolution) {
+    HiCFile* hicFile = new HiCFile(filePath);
+
+    std::vector<chromosome> chromosomes = hicFile->getChromosomes();
+
+    for (const auto& chr1 : chromosomes) {
+        if (chr1.index <= 0) continue;
+
+        for (const auto& chr2 : chromosomes) {
+            if (chr2.index <= 0 || chr1.index > chr2.index) continue;
+
+            try {
+                MatrixZoomData* mzd = hicFile->getMatrixZoomData(
+                    chr1.name, chr2.name, "observed", "NONE", "BP", resolution
+                );
+
+                if (mzd && mzd->foundFooter) {
+                    for (const auto& blockMapEntry : mzd->blockMap) {
+                        vector<contactRecord> records = readBlock(mzd->fileName, blockMapEntry.second, mzd->version);
+                        for (const contactRecord& rec : records) {
+                            if (rec.counts > 0 && !isnan(rec.counts) && !isinf(rec.counts)) {
+                                printf("%s %d %s %d %.14g\n",
+                                    chr1.name.c_str(), rec.binX,
+                                    chr2.name.c_str(), rec.binY,
+                                    rec.counts);
+                            }
+                        }
+                    }
+                }
+                delete mzd;
+            } catch (const std::exception& e) {
+                std::cerr << "Skipping chromosome pair " << chr1.name << "-" << chr2.name
+                         << ": " << e.what() << std::endl;
+            }
+        }
+    }
+
+    delete hicFile;
+}

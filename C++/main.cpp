@@ -40,6 +40,19 @@ bool containsIgnoreCase(const string& str, const string& substr) {
 
 int main(int argc, char *argv[])
 {
+    // dump-text: dump all chr-chr pairs at a resolution as plain text
+    if (argc > 1 && string(argv[1]) == "dump-text") {
+        if (argc != 4) {
+            cerr << "Incorrect arguments for dump-text command" << endl;
+            cerr << "Usage: straw dump-text <hicFile> <resolution>" << endl;
+            exit(1);
+        }
+        string fname = argv[2];
+        int32_t binsize = stoi(argv[3]);
+        dumpAllAsText(fname, binsize);
+        return 0;
+    }
+
     // Check if this is a dump command
     if (argc > 1 && string(argv[1]) == "dump") {
         if (argc < 9 || argc > 10) {
@@ -81,6 +94,7 @@ int main(int argc, char *argv[])
         cerr << "Incorrect arguments" << endl;
         cerr << "Usage: straw [observed/oe/expected] <NONE/VC/VC_SQRT/KR> <hicFile(s)> <chr1>[:x1:x2] <chr2>[:y1:y2] <BP/FRAG/MATRIX> <binsize>" << endl;
         cerr << "   or: straw dump <observed/oe/expected> <NONE/VC/VC_SQRT/KR> <hicFile> <BP/FRAG> <binsize> <outputFile>" << endl;
+        cerr << "   or: straw dump-text <hicFile> <resolution>" << endl;
         exit(1);
     }
     int offset = 0;

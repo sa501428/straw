@@ -34,13 +34,15 @@ enum class ContactFilter {
     INTRA          // All intra-chromosomal records
 };
 
-void dumpGenomeWideDataAtResolution(const std::string& matrixType, 
-                                  const std::string& norm, 
-                                  const std::string& filePath, 
-                                  const std::string& unit, 
-                                  int32_t resolution, 
+void dumpGenomeWideDataAtResolution(const std::string& matrixType,
+                                  const std::string& norm,
+                                  const std::string& filePath,
+                                  const std::string& unit,
+                                  int32_t resolution,
                                   const std::string& outputPath,
                                   bool compressed = true,
                                   ContactFilter filter = ContactFilter::ALL);
+
+void dumpAllAsText(const std::string& filePath, int32_t resolution);
 
 #endif 
