@@ -1481,12 +1481,23 @@ public:
         
         ThreadPool pool(numThreads);
 
-        // Submit all tasks to thread pool
+        // Pre-filter to blocks that actually exist in the map.
+        // blockMap[key] inserts a default entry when key is missing, which
+        // is a data race when multiple threads call it concurrently.
+        // Filtering first keeps all subsequent lambda accesses read-only.
+        set<int32_t> existingBlocks;
         for (int32_t blockNumber : blockNumbers) {
+            if (blockMap.count(blockNumber) > 0) {
+                existingBlocks.insert(blockNumber);
+            }
+        }
+
+        // Submit all tasks to thread pool
+        for (int32_t blockNumber : existingBlocks) {
             futures.push_back(
                 pool.enqueue([this, blockNumber, &origRegionIndices]() {
                     return processBlock(
-                        fileName, blockMap[blockNumber], version,
+                        fileName, blockMap.at(blockNumber), version,
                         origRegionIndices, resolution,
                         norm, c1Norm, c2Norm, isIntra,
                         matrixType, expectedValues, avgCount
