@@ -53,3 +53,6 @@ env
 hic_straw.egg-info
 
 .Rproj.user
+/C++/build
+/run
+/tools

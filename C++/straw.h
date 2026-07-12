@@ -25,6 +25,7 @@
 #define STRAW_H
 
 #include <fstream>
+#include <functional>
 #include <set>
 #include <vector>
 #include <map>
@@ -96,6 +97,12 @@ struct MemoryStruct {
 std::vector<contactRecord> straw(const std::string& matrixType, const std::string& norm, const std::string& fname, 
                                const std::string& chr1loc, const std::string& chr2loc, const std::string& unit, 
                                int32_t binsize);
+
+using StrawRecordCallback = std::function<void(const contactRecord&)>;
+
+bool strawStream(const std::string& matrixType, const std::string& norm, const std::string& fname,
+                 const std::string& chr1loc, const std::string& chr2loc, const std::string& unit,
+                 int32_t binsize, const StrawRecordCallback& callback);
 
 std::vector<std::vector<float>> strawAsMatrix(const std::string& matrixType, const std::string& norm, 
                                             const std::string& fileName, const std::string& chr1loc, 

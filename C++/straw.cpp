@@ -1267,6 +1267,55 @@ BlockResult processBlock(const string &filename, indexEntry idx, int32_t version
     return result;
 }
 
+void processBlockRecords(const string &filename, indexEntry idx, int32_t version,
+                         int64_t *regionIndices, int32_t resolution,
+                         const string &norm, vector<double> &c1Norm, vector<double> &c2Norm,
+                         bool isIntra, const string &matrixType, vector<double> &expectedValues,
+                         double avgCount, const StrawRecordCallback &callback) {
+    vector<contactRecord> records = readBlock(filename, idx, version);
+
+    for (contactRecord rec : records) {
+        int64_t x = rec.binX * resolution;
+        int64_t y = rec.binY * resolution;
+
+        if ((x >= regionIndices[0] && x <= regionIndices[1] &&
+             y >= regionIndices[2] && y <= regionIndices[3]) ||
+            (isIntra && y >= regionIndices[0] && y <= regionIndices[1] &&
+             x >= regionIndices[2] && x <= regionIndices[3])) {
+
+            float c = rec.counts;
+            if (norm != "NONE") {
+                c = static_cast<float>(c / (c1Norm[rec.binX] * c2Norm[rec.binY]));
+            }
+            if (matrixType == "oe") {
+                if (isIntra) {
+                    c = static_cast<float>(c / expectedValues[min(expectedValues.size() - 1,
+                                                              (size_t) floor(abs(y - x) /
+                                                                         resolution))]);
+                } else {
+                    c = static_cast<float>(c / avgCount);
+                }
+            } else if (matrixType == "expected") {
+                if (isIntra) {
+                    c = static_cast<float>(expectedValues[min(expectedValues.size() - 1,
+                                                              (size_t) floor(abs(y - x) /
+                                                                         resolution))]);
+                } else {
+                    c = static_cast<float>(avgCount);
+                }
+            }
+
+            if (!isnan(c) && !isinf(c)) {
+                contactRecord record = contactRecord();
+                record.binX = static_cast<int32_t>(x);
+                record.binY = static_cast<int32_t>(y);
+                record.counts = c;
+                callback(record);
+            }
+        }
+    }
+}
+
 class ThreadPool {
 public:
     explicit ThreadPool(size_t numThreads) : stop(false) {
@@ -1532,6 +1581,31 @@ public:
         return records;
     }
 
+    void streamRecords(int64_t gx0, int64_t gx1, int64_t gy0, int64_t gy1,
+                       const StrawRecordCallback &callback) {
+        if (!foundFooter) {
+            return;
+        }
+        int64_t origRegionIndices[] = {gx0, gx1, gy0, gy1};
+        int64_t regionIndices[4];
+        convertGenomeToBinPos(origRegionIndices, regionIndices, resolution);
+
+        set<int32_t> blockNumbers = getBlockNumbers(regionIndices);
+        for (int32_t blockNumber : blockNumbers) {
+            auto found = blockMap.find(blockNumber);
+            if (found == blockMap.end()) {
+                continue;
+            }
+            processBlockRecords(
+                fileName, found->second, version,
+                origRegionIndices, resolution,
+                norm, c1Norm, c2Norm, isIntra,
+                matrixType, expectedValues, avgCount,
+                callback
+            );
+        }
+    }
+
     vector<vector<float> > getRecordsAsMatrix(int64_t gx0, int64_t gx1, int64_t gy0, int64_t gy1) {
         vector<contactRecord> records = this->getRecords(gx0, gx1, gy0, gy1);
         if (records.empty()) {
@@ -1710,14 +1784,14 @@ void parsePositions(const string &chrLoc, string &chrom, int64_t &pos1, int64_t 
     }
 }
 
-vector<contactRecord> straw(const string &matrixType, const string &norm, const string &fileName, const string &chr1loc,
-                            const string &chr2loc, const string &unit, int32_t binsize) {
+bool strawStream(const string &matrixType, const string &norm, const string &fileName, const string &chr1loc,
+                 const string &chr2loc, const string &unit, int32_t binsize,
+                 const StrawRecordCallback &callback) {
     if (!(unit == "BP" || unit == "FRAG")) {
         cerr << "Norm specified incorrectly, must be one of <BP/FRAG>" << endl;
         cerr << "Usage: straw [observed/oe/expected] <NONE/VC/VC_SQRT/KR> <hicFile(s)> <chr1>[:x1:x2] <chr2>[:y1:y2] <BP/FRAG> <binsize>"
              << endl;
-        vector<contactRecord> v;
-        return v;
+        return false;
     }
 
     HiCFile *hiCFile = new HiCFile(fileName);
@@ -1728,11 +1802,27 @@ vector<contactRecord> straw(const string &matrixType, const string &norm, const 
 
     if (hiCFile->chromosomeMap[chr1].index > hiCFile->chromosomeMap[chr2].index) {
         MatrixZoomData *mzd = hiCFile->getMatrixZoomData(chr2, chr1, matrixType, norm, unit, binsize);
-        return mzd->getRecords(origRegionIndices[2], origRegionIndices[3], origRegionIndices[0], origRegionIndices[1]);
+        mzd->streamRecords(origRegionIndices[2], origRegionIndices[3], origRegionIndices[0], origRegionIndices[1],
+                           callback);
+        delete mzd;
     } else {
         MatrixZoomData *mzd = hiCFile->getMatrixZoomData(chr1, chr2, matrixType, norm, unit, binsize);
-        return mzd->getRecords(origRegionIndices[0], origRegionIndices[1], origRegionIndices[2], origRegionIndices[3]);
+        mzd->streamRecords(origRegionIndices[0], origRegionIndices[1], origRegionIndices[2], origRegionIndices[3],
+                           callback);
+        delete mzd;
     }
+    delete hiCFile;
+    return true;
+}
+
+vector<contactRecord> straw(const string &matrixType, const string &norm, const string &fileName, const string &chr1loc,
+                            const string &chr2loc, const string &unit, int32_t binsize) {
+    vector<contactRecord> records;
+    strawStream(matrixType, norm, fileName, chr1loc, chr2loc, unit, binsize,
+                [&records](const contactRecord &record) {
+                    records.push_back(record);
+                });
+    return records;
 }
 
 vector<vector<float> > strawAsMatrix(const string &matrixType, const string &norm, const string &fileName, const string &chr1loc,
