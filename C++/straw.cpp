@@ -62,12 +62,13 @@ static size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, voi
     struct MemoryStruct *mem;
     mem = (struct MemoryStruct *) userp;
 
-    mem->memory = static_cast<char *>(realloc(mem->memory, mem->size + realsize + 1));
-    if (mem->memory == nullptr) {
+    char *resized = static_cast<char *>(realloc(mem->memory, mem->size + realsize + 1));
+    if (resized == nullptr) {
         /* out of memory! */
         printf("not enough memory (realloc returned NULL)\n");
         return 0;
     }
+    mem->memory = resized;
 
     std::memcpy(&(mem->memory[mem->size]), contents, realsize);
     mem->size += realsize;
@@ -82,13 +83,14 @@ char *getData(CURL *curl, int64_t position, int64_t chunksize) {
     struct MemoryStruct chunk{};
     chunk.memory = static_cast<char *>(malloc(1));
     chunk.size = 0;    /* no data at this point */
-    oss << position << "-" << position + chunksize;
+    oss << position << "-" << position + chunksize - 1;
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *) &chunk);
     curl_easy_setopt(curl, CURLOPT_RANGE, oss.str().c_str());
     CURLcode res = curl_easy_perform(curl);
     if (res != CURLE_OK) {
-        fprintf(stderr, "curl_easy_perform() failed: %s\n",
-                curl_easy_strerror(res));
+        const string message = string("curl_easy_perform() failed: ") + curl_easy_strerror(res);
+        free(chunk.memory);
+        throw runtime_error(message);
     }
 
     return chunk.memory;
@@ -144,6 +146,14 @@ void convertGenomeToBinPos(const int64_t origRegionIndices[4], int64_t regionInd
 }
 
 static CURL *initCURL(const char *url) {
+    static once_flag curlInitFlag;
+    call_once(curlInitFlag, [] {
+        const CURLcode result = curl_global_init(CURL_GLOBAL_DEFAULT);
+        if (result != CURLE_OK) {
+            throw runtime_error(string("Unable to initialize libcurl: ") + curl_easy_strerror(result));
+        }
+    });
+
     CURL *curl = curl_easy_init();
     if (curl) {
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
@@ -161,7 +171,7 @@ class HiCFileStream {
 public:
     string prefix = "http"; // HTTP code
     ifstream fin;
-    CURL *curl;
+    CURL *curl = nullptr;
     bool isHttp = false;
 
     explicit HiCFileStream(const string &fileName) {
@@ -181,10 +191,17 @@ public:
         }
     }
 
+    ~HiCFileStream() {
+        close();
+    }
+
     void close() {
         if (isHttp) {
-            curl_easy_cleanup(curl);
-        } else {
+            if (curl != nullptr) {
+                curl_easy_cleanup(curl);
+                curl = nullptr;
+            }
+        } else if (fin.is_open()) {
             fin.close();
         }
     }
@@ -193,20 +210,24 @@ public:
         if (isHttp) {
             return getData(curl, idx.position, idx.size);
         } else {
-            char *buffer = new char[idx.size];
+            char *buffer = static_cast<char *>(malloc(static_cast<size_t>(idx.size)));
+            if (buffer == nullptr) {
+                throw bad_alloc();
+            }
             fin.seekg(idx.position, ios::beg);
             fin.read(buffer, idx.size);
+            if (!fin) {
+                free(buffer);
+                throw runtime_error("Unable to read compressed .hic block");
+            }
             return buffer;
         }
     }
 };
 
 char *readCompressedBytesFromFile(const string &fileName, indexEntry idx) {
-    HiCFileStream *stream = new HiCFileStream(fileName);
-    char *compressedBytes = stream->readCompressedBytes(idx);
-    stream->close();
-    delete stream;
-    return compressedBytes;
+    HiCFileStream stream(fileName);
+    return stream.readCompressedBytes(idx);
 }
 
 // reads the header, storing the positions of the normalization vectors and returning the masterIndexPosition pointer
@@ -310,7 +331,7 @@ int64_t readThroughExpectedVectorURL(CURL *curl, int64_t currentPointer, int32_t
         } else {
             populateVectorWithDoubles(fin, expectedValues, nValues);
         }
-        delete buffer;
+        free(buffer);
     }
 
     if (version > 8) {
@@ -362,7 +383,7 @@ int64_t readThroughNormalizationFactorsURL(CURL *curl, int64_t currentPointer, i
                 }
             }
         }
-        delete buffer;
+        free(buffer);
     }
 
     if (version > 8) {
@@ -433,7 +454,7 @@ bool readFooterURL(CURL *curl, int64_t master, int32_t version, int32_t c1, int3
     int32_t nEntries = readInt32FromFile(newFin);
 
     currentPointer += 4;
-    delete buffer;
+    free(buffer);
 
     int32_t bufferSize0 = nEntries * 50;
     buffer = getData(curl, currentPointer, bufferSize0);
@@ -456,7 +477,7 @@ bool readFooterURL(CURL *curl, int64_t master, int32_t version, int32_t c1, int3
             found = true;
         }
     }
-    delete buffer;
+    free(buffer);
     if (!found) {
         cerr << "Remote file doesn't have the given chr_chr map " << key << endl;
         return false;
@@ -475,7 +496,7 @@ bool readFooterURL(CURL *curl, int64_t master, int32_t version, int32_t c1, int3
     int32_t nExpectedValues = readInt32FromFile(newFin3);
 
     currentPointer += 4;
-    delete buffer;
+    free(buffer);
     for (int i = 0; i < nExpectedValues; i++) {
 
         buffer = getData(curl, currentPointer, 1000);
@@ -500,7 +521,7 @@ bool readFooterURL(CURL *curl, int64_t master, int32_t version, int32_t c1, int3
             currentPointer += 4;
         }
 
-        delete buffer;
+        free(buffer);
 
         bool store = c1 == c2 && (matrixType == "oe" || matrixType == "expected") && norm == "NONE" && unit0 == unit &&
                      binSize == resolution;
@@ -513,7 +534,7 @@ bool readFooterURL(CURL *curl, int64_t master, int32_t version, int32_t c1, int3
         int32_t nNormalizationFactors = readInt32FromFile(newFin5);
 
         currentPointer += 4;
-        delete buffer;
+        free(buffer);
 
         currentPointer += readThroughNormalizationFactorsURL(curl, currentPointer, version, store, expectedValues, c1, nNormalizationFactors);
     }
@@ -532,7 +553,7 @@ bool readFooterURL(CURL *curl, int64_t master, int32_t version, int32_t c1, int3
     nExpectedValues = readInt32FromFile(newFin6);
 
     currentPointer += 4;
-    delete buffer;
+    free(buffer);
     for (int i = 0; i < nExpectedValues; i++) {
         buffer = getData(curl, currentPointer, 1000);
 
@@ -559,7 +580,7 @@ bool readFooterURL(CURL *curl, int64_t master, int32_t version, int32_t c1, int3
         bool store = c1 == c2 && (matrixType == "oe" || matrixType == "expected") && nType == norm && unit0 == unit &&
                      binSize == resolution;
 
-        delete buffer;
+        free(buffer);
 
         currentPointer += readThroughExpectedVectorURL(curl, currentPointer, version, expectedValues, nValues, store, resolution);
 
@@ -569,7 +590,7 @@ bool readFooterURL(CURL *curl, int64_t master, int32_t version, int32_t c1, int3
         int32_t nNormalizationFactors = readInt32FromFile(newFin8);
 
         currentPointer += 4;
-        delete buffer;
+        free(buffer);
 
         currentPointer += readThroughNormalizationFactorsURL(curl, currentPointer, version, store, expectedValues, c1, nNormalizationFactors);
     }
@@ -587,7 +608,7 @@ bool readFooterURL(CURL *curl, int64_t master, int32_t version, int32_t c1, int3
     nEntries = readInt32FromFile(newFin9);
 
     currentPointer += 4;
-    delete buffer;
+    free(buffer);
 
     bool found1 = false;
     bool found2 = false;
@@ -632,7 +653,7 @@ bool readFooterURL(CURL *curl, int64_t master, int32_t version, int32_t c1, int3
             found2 = true;
         }
     }
-    delete buffer;
+    free(buffer);
     if (!found1 || !found2) {
         cerr << "Remote file did not contain " << norm << " normalization vectors for one or both chromosomes at "
              << resolution << " " << unit << endl;
@@ -835,19 +856,19 @@ map<int32_t, indexEntry> readMatrixZoomDataHttp(CURL *curl, int64_t &myFilePosit
         cerr << "Unit not understood" << endl;
         return blockMap;
     }
-    delete first;
+    free(first);
     char *buffer = getData(curl, myFilePosition, header_size);
     memstream fin(buffer, header_size);
     setValuesForMZD(fin, myunit, mySumCounts, mybinsize, myBlockBinCount, myBlockColumnCount, found);
     int32_t nBlocks = readInt32FromFile(fin);
-    delete buffer;
+    free(buffer);
 
     if (found) {
         int32_t chunkSize = nBlocks * (sizeof(int32_t) + sizeof(int64_t) + sizeof(int32_t));
         buffer = getData(curl, myFilePosition + header_size, chunkSize);
         memstream fin2(buffer, chunkSize);
         populateBlockMap(fin2, nBlocks, blockMap);
-        delete buffer;
+        free(buffer);
     } else {
         myFilePosition = myFilePosition + header_size
                          + (nBlocks * (sizeof(int32_t) + sizeof(int64_t) + sizeof(int32_t)));
@@ -869,7 +890,7 @@ map<int32_t, indexEntry> readMatrixHttp(CURL *curl, int64_t myFilePosition, cons
     int32_t i = 0;
     bool found = false;
     myFilePosition = myFilePosition + size;
-    delete buffer;
+    free(buffer);
     map<int32_t, indexEntry> blockMap;
 
     while (i < nRes && !found) {
@@ -1022,19 +1043,19 @@ long getNumRecordsInBlock(const string &fileName, indexEntry idx, int32_t versio
     memstream bufferin(uncompressedBytes, uncompressedSize);
     uint64_t nRecords;
     nRecords = static_cast<uint64_t>(readInt32FromFile(bufferin));
-    delete[] compressedBytes;
+    free(compressedBytes);
     delete[] uncompressedBytes; // don't forget to delete your heap arrays in C++!
     return nRecords;
 }
 
 // this is the meat of reading the data.  takes in the block number and returns the set of contact records corresponding to
 // that block.  the block data is compressed and must be decompressed using the zlib library functions
-vector<contactRecord> readBlock(const string &fileName, indexEntry idx, int32_t version) {
+vector<contactRecord> readBlock(HiCFileStream &stream, indexEntry idx, int32_t version) {
     if (idx.size <= 0) {
         vector<contactRecord> v;
         return v;
     }
-    char *compressedBytes = readCompressedBytesFromFile(fileName, idx);
+    char *compressedBytes = stream.readCompressedBytes(idx);
     char *uncompressedBytes = new char[idx.size * 10]; //biggest seen so far is 3
     int32_t uncompressedSize = decompressBlock(idx, compressedBytes, uncompressedBytes);
 
@@ -1043,6 +1064,7 @@ vector<contactRecord> readBlock(const string &fileName, indexEntry idx, int32_t 
     uint64_t nRecords;
     nRecords = static_cast<uint64_t>(readInt32FromFile(bufferin));
     vector<contactRecord> v(nRecords);
+    int32_t index = 0;
     // different versions have different specific formats
     if (version < 7) {
         for (uInt i = 0; i < nRecords; i++) {
@@ -1072,7 +1094,6 @@ vector<contactRecord> readBlock(const string &fileName, indexEntry idx, int32_t 
             useDeltaColumn = readCharFromFile(bufferin) != 0;
         }
 
-        int32_t index = 0;
         if (type == 1) {
             if (useShortBinX && useShortBinY) {
                 int16_t rowCount = readInt16FromFile(bufferin);
@@ -1169,9 +1190,17 @@ vector<contactRecord> readBlock(const string &fileName, indexEntry idx, int32_t 
             }
         }
     }
-    delete[] compressedBytes;
+    free(compressedBytes);
+    if (version >= 7) {
+        v.resize(static_cast<size_t>(index));
+    }
     delete[] uncompressedBytes; // don't forget to delete your heap arrays in C++!
     return v;
+}
+
+vector<contactRecord> readBlock(const string &fileName, indexEntry idx, int32_t version) {
+    HiCFileStream stream(fileName);
+    return readBlock(stream, idx, version);
 }
 
 // reads the normalization vector from the file at the specified location
@@ -1422,17 +1451,17 @@ public:
         this->norm = norm;
         this->resolution = resolution;
 
-        HiCFileStream *stream = new HiCFileStream(fileName);
+        HiCFileStream stream(fileName);
         indexEntry c1NormEntry{}, c2NormEntry{};
 
-        if (stream->isHttp) {
-            foundFooter = readFooterURL(stream->curl, master, version, c1, c2, matrixType, norm, unit,
+        if (stream.isHttp) {
+            foundFooter = readFooterURL(stream.curl, master, version, c1, c2, matrixType, norm, unit,
                                      resolution,
                                      myFilePos,
                                      c1NormEntry, c2NormEntry, expectedValues);
         } else {
-            stream->fin.seekg(master, ios::beg);
-            foundFooter = readFooter(stream->fin, master, version, c1, c2, matrixType, norm,
+            stream.fin.seekg(master, ios::beg);
+            foundFooter = readFooter(stream.fin, master, version, c1, c2, matrixType, norm,
                                      unit,
                                      resolution, myFilePos,
                                      c1NormEntry, c2NormEntry, expectedValues);
@@ -1441,7 +1470,7 @@ public:
         if (!foundFooter) {
             return;
         }
-        stream->close();
+        stream.close();
 
         if (norm != "NONE") {
             c1Norm = readNormalizationVectorFromFooter(c1NormEntry, version, fileName);
@@ -1452,19 +1481,19 @@ public:
             }
         }
 
-        HiCFileStream *stream2 = new HiCFileStream((fileName));
-        if (stream2->isHttp) {
+        HiCFileStream stream2(fileName);
+        if (stream2.isHttp) {
             // readMatrix will assign blockBinCount and blockColumnCount
-            blockMap = readMatrixHttp(stream2->curl, myFilePos, unit, resolution, sumCounts,
+            blockMap = readMatrixHttp(stream2.curl, myFilePos, unit, resolution, sumCounts,
                                       blockBinCount,
                                       blockColumnCount);
         } else {
             // readMatrix will assign blockBinCount and blockColumnCount
-            blockMap = readMatrix(stream2->fin, myFilePos, unit, resolution, sumCounts,
+            blockMap = readMatrix(stream2.fin, myFilePos, unit, resolution, sumCounts,
                                   blockBinCount,
                                   blockColumnCount);
         }
-        stream2->close();
+        stream2.close();
 
         if (!isIntra) {
             avgCount = (sumCounts / numBins1) / numBins2;   // <= trying to avoid overflows
@@ -1476,7 +1505,7 @@ public:
         char *buffer = readCompressedBytesFromFile(fileName, cNormEntry);
         memstream bufferin(buffer, cNormEntry.size);
         vector<double> cNorm = readNormalizationVector(bufferin, version);
-        delete buffer;
+        free(buffer);
         return cNorm;
     }
 
@@ -1671,13 +1700,13 @@ public:
     int64_t nviPosition = 0LL;
     int64_t nviLength = 0LL;
     vector<int32_t> resolutions;
-    static int64_t totalFileSize;
+    static thread_local int64_t totalFileSize;
     string fileName;
 
     static size_t hdf(char *b, size_t size, size_t nitems, void *userdata) {
+        (void)userdata;
         size_t numbytes = size * nitems;
-        b[numbytes + 1] = '\0';
-        string s(b);
+        string s(b, numbytes);
         int32_t found;
         found = static_cast<int32_t>(s.find("content-range"));
         if ((size_t) found == string::npos) {
@@ -1715,7 +1744,7 @@ public:
                                        version, nviPosition, nviLength);
             resolutions = readResolutionsFromHeader(bufin);
             curl_easy_cleanup(curl);
-            delete buffer;
+            free(buffer);
         } else {
             ifstream fin;
             fin.open(fileName, fstream::in | fstream::binary);
@@ -1739,7 +1768,7 @@ public:
     }
 
     vector<chromosome> getChromosomes() {
-        chromosome chromosomes[chromosomeMap.size()];
+        vector<chromosome> chromosomes(chromosomeMap.size());
         map<string, chromosome>::iterator iter = chromosomeMap.begin();
         while (iter != chromosomeMap.end()) {
             chromosome chrom = static_cast<chromosome>(iter->second);
@@ -1747,12 +1776,7 @@ public:
             iter++;
         }
 
-        vector<chromosome> final_chromosomes;
-        final_chromosomes.reserve(chromosomeMap.size());
-        for(int32_t i = 0; i < chromosomeMap.size(); i++){
-            final_chromosomes.push_back(chromosomes[i]);
-        }
-        return final_chromosomes;
+        return chromosomes;
     }
 
     MatrixZoomData * getMatrixZoomData(const string &chr1, const string &chr2, const string &matrixType,
@@ -1764,7 +1788,7 @@ public:
     }
 };
 
-int64_t HiCFile::totalFileSize = 0LL;
+thread_local int64_t HiCFile::totalFileSize = 0LL;
 
 void parsePositions(const string &chrLoc, string &chrom, int64_t &pos1, int64_t &pos2, map<string, chromosome> map) {
     string x, y;
@@ -1848,6 +1872,52 @@ vector<vector<float> > strawAsMatrix(const string &matrixType, const string &nor
         MatrixZoomData *mzd = hiCFile->getMatrixZoomData(chr1, chr2, matrixType, norm, unit, binsize);
         return mzd->getRecordsAsMatrix(origRegionIndices[0], origRegionIndices[1], origRegionIndices[2], origRegionIndices[3]);
     }
+}
+
+vector<chromosome> getChromosomesForFile(const string &fileName) {
+    HiCFile hiCFile(fileName);
+    return hiCFile.getChromosomes();
+}
+
+vector<int32_t> getResolutionsForFile(const string &fileName) {
+    HiCFile hiCFile(fileName);
+    return hiCFile.getResolutions();
+}
+
+void forEachRawObservedBlock(const string &fileName,
+                             const string &chr1,
+                             const string &chr2,
+                             int32_t binsize,
+                             const StrawBlockCallback &processor) {
+    HiCFile hiCFile(fileName);
+    string first = chr1;
+    string second = chr2;
+    if (hiCFile.chromosomeMap[first].index > hiCFile.chromosomeMap[second].index) {
+        swap(first, second);
+    }
+
+    MatrixZoomData *mzd = hiCFile.getMatrixZoomData(first, second, "observed", "NONE", "BP", binsize);
+    if (mzd == nullptr || !mzd->foundFooter) {
+        delete mzd;
+        return;
+    }
+
+    int64_t regionIndices[4] = {0, mzd->numBins1, 0, mzd->numBins2};
+    set<int32_t> blockNumbers = mzd->getBlockNumbers(regionIndices);
+    HiCFileStream stream(fileName);
+    for (int32_t blockNumber : blockNumbers) {
+        const auto found = mzd->blockMap.find(blockNumber);
+        if (found == mzd->blockMap.end()) {
+            continue;
+        }
+
+        vector<contactRecord> blockRecords = readBlock(stream, found->second, mzd->version);
+        if (!blockRecords.empty()) {
+            processor(blockRecords);
+        }
+    }
+
+    delete mzd;
 }
 
 int64_t getNumRecordsForFile(const string &fileName, int32_t binsize, bool interOnly) {

@@ -77,6 +77,7 @@ struct memstream : virtual membuf, std::istream {
     std::istream::pos_type seekoff(std::istream::off_type off,
                                     std::ios_base::seekdir dir,
                                     std::ios_base::openmode which = std::ios_base::in) override {
+        (void)which;
         if (dir == std::ios_base::cur)
             gbump(off);
         else if (dir == std::ios_base::end)
@@ -108,6 +109,18 @@ std::vector<std::vector<float>> strawAsMatrix(const std::string& matrixType, con
                                             const std::string& fileName, const std::string& chr1loc, 
                                             const std::string& chr2loc, const std::string& unit, 
                                             int32_t binsize);
+
+using StrawBlockCallback = std::function<void(const std::vector<contactRecord>&)>;
+
+std::vector<chromosome> getChromosomesForFile(const std::string& fileName);
+
+std::vector<int32_t> getResolutionsForFile(const std::string& fileName);
+
+void forEachRawObservedBlock(const std::string& fileName,
+                             const std::string& chr1,
+                             const std::string& chr2,
+                             int32_t binsize,
+                             const StrawBlockCallback& processor);
 
 int64_t getNumRecordsForFile(const std::string& filename, int32_t binsize, bool interOnly);
 
