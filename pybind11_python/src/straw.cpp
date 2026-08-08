@@ -651,6 +651,7 @@ bool readFooterURL(CURL *curl, int64_t master, int32_t version, int32_t c1, int3
     if (!found1 || !found2) {
         cerr << "Remote file did not contain " << norm << " normalization vectors for one or both chromosomes at "
              << resolution << " " << unit << endl;
+        return false;
     }
     return true;
 }
@@ -778,6 +779,7 @@ bool readFooter(istream &fin, int64_t master, int32_t version, int32_t c1, int32
     if (!found1 || !found2) {
         cerr << "File did not contain " << norm << " normalization vectors for one or both chromosomes at "
              << resolution << " " << unit << endl;
+        return false;
     }
     return true;
 }
@@ -1248,9 +1250,15 @@ public:
         }
 
         if (!foundFooter) {
-            return;
+            stream->close();
+            delete stream;
+            stringstream message;
+            message << "Unable to load " << norm << " normalization for chromosome indices "
+                    << c1 << " and " << c2 << " at " << resolution << " " << unit;
+            throw runtime_error(message.str());
         }
         stream->close();
+        delete stream;
 
         if (norm != "NONE") {
             c1Norm = readNormalizationVectorFromFooter(c1NormEntry, version, fileName);
@@ -1274,6 +1282,7 @@ public:
                                   blockColumnCount);
         }
         stream2->close();
+        delete stream2;
 
         if (!isIntra) {
             avgCount = (sumCounts / numBins1) / numBins2;   // <= trying to avoid overflows
