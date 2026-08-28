@@ -15,17 +15,91 @@ The tool provides functionality to read .hic files and extract contact matrices 
 7. Build: `make`
 
 ## Usage:
-The main executable 'straw' supports two modes:
+The main executable 'straw' supports three modes:
 1. Standard mode:
 `straw [observed/oe/expected] <NONE/VC/VC_SQRT/KR> <hicFile> <chr1>[:x1:x2] <chr2>[:y1:y2] <BP/FRAG/MATRIX> <binsize>`
 2. Dump mode (creates slice file):
 `straw dump <observed/oe/expected> <NONE/VC/VC_SQRT/KR> <hicFile> <BP/FRAG> <binsize> <outputFile>`
+3. Subsample mode (prints weighted short text):
+`straw subsample <hicFile> <--fraction P|--contacts N> [--resolution BP] [--seed N]`
 
 ## Examples:
 1. Extract specific region:
 `straw observed NONE input.hic chr1:0:1000000 chr2:0:1000000 BP 10000`
 2. Create slice file at 10kb resolution:
 `straw dump observed NONE input.hic BP 10000 output.slc`
+
+## Subsample to weighted short text
+
+Export raw `observed NONE` contacts from V6–V9 or V10 to stdout:
+
+```sh
+# Retain each contact with probability 0.1.
+build/straw subsample input.hic --fraction 0.1 --seed 42 > sampled.short
+
+# Calculate p = 100000000 / total raw contacts at the coarsest BP resolution.
+build/straw subsample input.hic --contacts 100000000 --seed 42 > sampled.short
+
+# Export all counts, optionally choosing a particular available BP resolution.
+build/straw subsample input.hic --fraction 1 --resolution 1000 > full.short
+```
+
+Output has no header and uses five tab-separated columns:
+
+```text
+chr1    pos1    chr2    pos2    count
+```
+
+Positions are zero-based BP bin starts. All real cis and trans chromosome pairs
+are included, with each stored cell emitted once; the synthetic `ALL` overview
+is excluded. Chromosome pairs remain contiguous for the preprocessors. Cells
+with zero retained contacts are omitted. Diagnostics go to stderr.
+
+The default is the finest BP resolution with nonzero real-chromosome counts.
+Empty resolutions are skipped automatically, including ALL-only resolutions
+advertised by some converted files. `--resolution` uses the requested resolution
+without this fallback. `--contacts` always sums counts at the largest advertised
+BP bin size, across all real chromosome pairs, to set its probability. This is
+an **expected target**, not an exact retained total; source totals can also
+differ between resolutions because of filtering or legacy float rounding.
+A target above that coarse total is rejected. Zero is allowed for either mode.
+
+For each cell with raw count `n`, the retained count is distributed as
+`Binomial(n, p)`: each underlying contact is assessed independently. A cell
+containing two contacts can retain zero, one, or both. Large counts use a
+recursive beta/order-statistic binomial sampler, avoiding a loop over reads or
+a normal/Poisson approximation. Seed defaults to `1`. The same input, options,
+and executable give reproducible output; C++ standard-library differences can
+change the sequence between platforms/builds.
+
+Counts must be finite, nonnegative integers. Fractional/negative/nonfinite raw
+scores fail instead of being rounded or silently discarded. V10 integer counts
+are read and printed as `uint64_t`; legacy float counts retain only the precision
+already present in the source. Like other stdout tools, an error can leave
+partial output: check the exit status before using the text to rebuild a file.
+
+### Rebuild with hictools-c
+
+For an export at 1000 BP, for example:
+
+```sh
+hic_pre -f short -r 1000,5000,10000 sampled.short sampled.v9.hic chrom.sizes
+hic_v10 pre -f short -r 1000,5000,10000 sampled.short sampled.v10.hic chrom.sizes
+```
+
+Use chromosome names and lengths matching the source. Original read positions,
+strands, and restriction fragments cannot be recovered from a binned matrix.
+Rebuild at the export resolution or coarser multiples of it, and recompute any
+desired normalizations. Currently, hictools-c parses each text weight as float32,
+so individual weights above `2^24` may round when rebuilt, even though this
+exporter prints V10 integer counts exactly. V9 matrix storage also uses float32.
+
+Subsampling tests run under CTest. To additionally exercise short-format round
+trips through both hictools-c builders:
+
+```sh
+python3 tests/test_subsample.py build/straw /path/to/hic_pre /path/to/hic_v10
+```
 
 ## Slice Format:
 The slice format (.slc) is a binary format that contains:

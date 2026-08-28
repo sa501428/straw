@@ -8,7 +8,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
 
 # Add main.cpp file of project root directory as source file
-set(SOURCE_FILES main.cpp straw.cpp straw_v10.cpp)
+set(SOURCE_FILES main.cpp straw.cpp straw_v10.cpp subsample.cpp)
 add_executable(straw ${SOURCE_FILES})
 
 target_link_libraries(straw CURL::libcurl ZLIB::ZLIB Threads::Threads PkgConfig::ZSTD)
@@ -23,6 +23,9 @@ if(BUILD_TESTING)
     add_test(NAME v10_reader_conformance
       COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_v10.py
               $<TARGET_FILE:straw> $<TARGET_FILE:v10_api_probe>)
+    add_test(NAME subsample_short
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_subsample.py
+              $<TARGET_FILE:straw>)
   endif()
 endif()
 

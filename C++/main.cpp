@@ -28,6 +28,7 @@
 #include "straw.h"
 #include "straw_v10.h"
 #include "hic_slice.h"
+#include "subsample.h"
 using namespace std;
 
 // Helper function to check argument strings
@@ -41,6 +42,7 @@ bool containsIgnoreCase(const string& str, const string& substr) {
 
 static int run(int argc, char *argv[])
 {
+    if (argc > 1 && string(argv[1]) == "subsample") return subsampleMain(argc, argv);
     // Check if this is a dump command
     if (argc > 1 && string(argv[1]) == "dump") {
         if (argc < 9 || argc > 10) {
@@ -82,6 +84,7 @@ static int run(int argc, char *argv[])
         cerr << "Incorrect arguments" << endl;
         cerr << "Usage: straw [observed/oe/expected] <NONE/VC/VC_SQRT/KR> <hicFile(s)> <chr1>[:x1:x2] <chr2>[:y1:y2] <BP/FRAG/MATRIX> <binsize>" << endl;
         cerr << "   or: straw dump <observed/oe/expected> <NONE/VC/VC_SQRT/KR> <hicFile> <BP/FRAG> <binsize> <outputFile>" << endl;
+        cerr << "   or: straw subsample <hicFile> <--fraction P|--contacts N> [--resolution BP] [--seed N]" << endl;
         exit(1);
     }
     int offset = 0;
