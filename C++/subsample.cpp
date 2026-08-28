@@ -1,5 +1,6 @@
 #include "subsample.h"
 #include "straw_v10.h"
+#include "hbs.h"
 
 #include <algorithm>
 #include <cmath>
@@ -14,7 +15,7 @@
 namespace {
 const char* usage =
     "Usage: straw subsample <hicFile> <--fraction P|--contacts N> "
-    "[--resolution BP] [--seed N]\n"
+    "[--resolution BP] [--seed N] [--output output.hbs.gz]\n"
     "Prints chr1 pos1 chr2 pos2 count to stdout (tab-separated).\n"
     "Default: finest nonempty BP resolution, seed 1, all real cis/trans pairs.\n"
     "--contacts sets probability N / total at the coarsest BP resolution;\n"
@@ -80,6 +81,10 @@ uint64_t sample(uint64_t n, double p, std::mt19937_64& rng) {
 }
 } // namespace
 
+static int exportCounts(const std::string& path, double probability, bool contactsSet,
+                        uint64_t target, uint64_t seed, int32_t resolution, bool resolutionSet,
+                        const std::string& output, ContactFilter filter);
+
 int subsampleMain(int argc, char* argv[]) {
     if (argc == 3 && std::string(argv[2]) == "--help") {
         std::cout << usage;
@@ -91,6 +96,7 @@ int subsampleMain(int argc, char* argv[]) {
     double probability = 1;
     uint64_t target = 0, seed = 1;
     int32_t resolution = 0;
+    std::string output;
     for (int i = 3; i < argc; i += 2) {
         const std::string option = argv[i];
         if (i + 1 == argc) throw std::runtime_error("Missing value for " + option);
@@ -112,10 +118,18 @@ int subsampleMain(int argc, char* argv[]) {
             if (!n || n > INT32_MAX) throw std::runtime_error("Invalid BP resolution");
             resolution = static_cast<int32_t>(n);
             resolutionSet = true;
+        } else if ((option == "--output" || option == "-o") && output.empty()) {
+            if (!isHbsPath(value)) throw std::runtime_error("Binary output must end in .hbs.gz");
+            output = value;
         } else throw std::runtime_error("Unknown or repeated option: " + option);
     }
     if (fractionSet == contactsSet) throw std::runtime_error("Specify exactly one of --fraction or --contacts");
+    return exportCounts(path, probability, contactsSet, target, seed, resolution, resolutionSet, output, ContactFilter::ALL);
+}
 
+static int exportCounts(const std::string& path, double probability, bool contactsSet,
+                        uint64_t target, uint64_t seed, int32_t resolution, bool resolutionSet,
+                        const std::string& output, ContactFilter filter) {
     std::unique_ptr<straw_v10::File> v10;
     if (straw_v10::isV10(path)) v10.reset(new straw_v10::File(path));
     auto chromosomes = v10 ? v10->chromosomes() : getChromosomesForFile(path);
@@ -177,6 +191,7 @@ int subsampleMain(int argc, char* argv[]) {
         std::cerr << "Total raw contacts at " << coarse << " BP: " << total << '\n';
     }
     std::mt19937_64 rng(seed);
+    std::unique_ptr<HbsWriter> binary;
     std::sort(resolutions.begin(), resolutions.end());
     for (;;) {
         std::cerr << "Sampling at " << resolution << " BP; probability=" << std::setprecision(17)
@@ -184,8 +199,18 @@ int subsampleMain(int argc, char* argv[]) {
         bool hasCounts = false;
         visit(resolution, [&](const chromosome& a, const chromosome& b, uint64_t x, uint64_t y, uint64_t n) {
             hasCounts = hasCounts || n != 0;
+            if (filter == ContactFilter::INTER && a.index == b.index) return;
+            if (filter != ContactFilter::ALL && filter != ContactFilter::INTER) {
+                if (a.index != b.index) return;
+                const auto distance = (x > y ? x - y : y - x) / resolution;
+                if (filter == ContactFilter::INTRA_SHORT && distance >= uint64_t(5000000 / resolution)) return;
+                if (filter == ContactFilter::INTRA_LONG && distance <= uint64_t(5000000 / resolution)) return;
+            }
             const auto kept = sample(n, probability, rng);
-            if (kept) std::cout << a.name << '\t' << x << '\t' << b.name << '\t' << y << '\t' << kept << '\n';
+            if (kept && !output.empty()) {
+                if (!binary) binary.reset(new HbsWriter(path, output, resolution, chromosomes));
+                binary->record(a, x, b, y, kept);
+            } else if (kept) std::cout << a.name << '\t' << x << '\t' << b.name << '\t' << y << '\t' << kept << '\n';
             if (!std::cout) throw std::runtime_error("Failed writing short-format output");
         });
         auto next = std::upper_bound(resolutions.begin(), resolutions.end(), resolution);
@@ -195,7 +220,15 @@ int subsampleMain(int argc, char* argv[]) {
         std::cerr << "No real-chromosome counts at " << resolution << " BP; trying " << *next << " BP\n";
         resolution = *next;
     }
+    if (!output.empty()) {
+        if (!binary) binary.reset(new HbsWriter(path, output, resolution, chromosomes));
+        binary->finish();
+    }
     std::cout.flush();
     if (!std::cout) throw std::runtime_error("Failed writing short-format output");
     return 0;
+}
+
+void dumpHbs(const std::string& input, const std::string& output, int32_t resolution, ContactFilter filter) {
+    exportCounts(input, 1, false, 0, 1, resolution, true, output, filter);
 }

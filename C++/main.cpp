@@ -29,6 +29,7 @@
 #include "straw_v10.h"
 #include "hic_slice.h"
 #include "subsample.h"
+#include "hbs.h"
 using namespace std;
 
 // Helper function to check argument strings
@@ -45,7 +46,8 @@ static int run(int argc, char *argv[])
     if (argc > 1 && string(argv[1]) == "subsample") return subsampleMain(argc, argv);
     // Check if this is a dump command
     if (argc > 1 && string(argv[1]) == "dump") {
-        if (argc < 9 || argc > 10) {
+        const bool hbs = argc >= 8 && isHbsPath(argv[7]);
+        if (argc < (hbs ? 8 : 9) || argc > 10) {
             cerr << "Incorrect arguments for dump command" << endl;
             cerr << "Usage: straw dump <observed/oe/expected> <NONE/VC/VC_SQRT/KR> <hicFile> <BP/FRAG> <binsize> <outputFile> <compressed> [-intra-short|-intra-long|-inter|-intra]" << endl;
             exit(1);
@@ -56,12 +58,12 @@ static int run(int argc, char *argv[])
         string unit = argv[5];
         int32_t binsize = stoi(argv[6]);
         string outputPath = argv[7];
-        bool compressed = (string(argv[8]) == "1" || string(argv[8]) == "true" || string(argv[8]) == "compressed");
+        bool compressed = argc >= 9 && (string(argv[8]) == "1" || string(argv[8]) == "true" || string(argv[8]) == "compressed");
         ContactFilter filter = ContactFilter::ALL;
         
         // Parse optional filter argument more flexibly
-        if (argc == 10) {
-            string arg = argv[9];
+        if (argc == 10 || (hbs && argc == 9 && argv[8][0] == '-')) {
+            string arg = argv[argc - 1];
             if (containsIgnoreCase(arg, "inter")) {
                 filter = ContactFilter::INTER;
             } else if (containsIgnoreCase(arg, "intra")) {
@@ -75,6 +77,12 @@ static int run(int argc, char *argv[])
             }
         }
 
+        if (hbs) {
+            if (matrixType != "observed" || norm != "NONE" || unit != "BP")
+                throw runtime_error("HBS output requires observed NONE BP (integer raw counts)");
+            dumpHbs(fname, outputPath, binsize, filter);
+            return 0;
+        }
         dumpGenomeWideDataAtResolution(matrixType, norm, fname, unit, binsize, outputPath, compressed, filter);
         return 0;
     }
@@ -84,7 +92,7 @@ static int run(int argc, char *argv[])
         cerr << "Incorrect arguments" << endl;
         cerr << "Usage: straw [observed/oe/expected] <NONE/VC/VC_SQRT/KR> <hicFile(s)> <chr1>[:x1:x2] <chr2>[:y1:y2] <BP/FRAG/MATRIX> <binsize>" << endl;
         cerr << "   or: straw dump <observed/oe/expected> <NONE/VC/VC_SQRT/KR> <hicFile> <BP/FRAG> <binsize> <outputFile>" << endl;
-        cerr << "   or: straw subsample <hicFile> <--fraction P|--contacts N> [--resolution BP] [--seed N]" << endl;
+        cerr << "   or: straw subsample <hicFile> <--fraction P|--contacts N> [--resolution BP] [--seed N] [--output output.hbs.gz]" << endl;
         exit(1);
     }
     int offset = 0;

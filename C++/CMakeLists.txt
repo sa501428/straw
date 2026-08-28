@@ -8,7 +8,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
 
 # Add main.cpp file of project root directory as source file
-set(SOURCE_FILES main.cpp straw.cpp straw_v10.cpp subsample.cpp)
+set(SOURCE_FILES main.cpp straw.cpp straw_v10.cpp subsample.cpp hbs.cpp)
 add_executable(straw ${SOURCE_FILES})
 
 target_link_libraries(straw CURL::libcurl ZLIB::ZLIB Threads::Threads PkgConfig::ZSTD)

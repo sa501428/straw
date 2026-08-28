@@ -21,7 +21,7 @@ The main executable 'straw' supports three modes:
 2. Dump mode (creates slice file):
 `straw dump <observed/oe/expected> <NONE/VC/VC_SQRT/KR> <hicFile> <BP/FRAG> <binsize> <outputFile>`
 3. Subsample mode (prints weighted short text):
-`straw subsample <hicFile> <--fraction P|--contacts N> [--resolution BP] [--seed N]`
+`straw subsample <hicFile> <--fraction P|--contacts N> [--resolution BP] [--seed N] [--output output.hbs.gz]`
 
 ## Examples:
 1. Extract specific region:
@@ -100,6 +100,44 @@ trips through both hictools-c builders:
 ```sh
 python3 tests/test_subsample.py build/straw /path/to/hic_pre /path/to/hic_v10
 ```
+
+## Compressed binary short output (.hbs.gz)
+
+Both `subsample` and `dump` can write HBS, a compact binary alternative to
+five-column text:
+
+```sh
+build/straw subsample input.hic --fraction 0.1 --seed 42 --output sampled.hbs.gz
+build/straw subsample input.hic --contacts 100000000 -o sampled.hbs.gz
+build/straw dump observed NONE input.hic BP 1000 full.hbs.gz
+build/straw dump observed NONE input.hic BP 1000 trans.hbs.gz -inter
+```
+
+`--output` / `-o` selects a named `.hbs.gz` file; subsampling without it continues
+to print text to stdout. `dump` selects HBS by the output suffix. Its legacy
+compression argument may be omitted for HBS, or supplied for compatibility;
+HBS is always gzip-compressed. Existing dump filters are supported. Other output
+suffixes retain the existing slice behavior. HBS only accepts `observed NONE`
+and `BP`, since it stores integer raw counts.
+
+The header stores resolution, chromosome names, and lengths. Records use uint16
+chromosome IDs, uint32 bin indices, and uint16 counts: **14 bytes** before gzip.
+Counts of 65,535 or more use an escape followed by uint64, making those records
+22 bytes. There is no integer precision loss. See [HBS_FORMAT.md](https://github.com/sa501428/hic-format)
+for the versioned byte layout.
+
+Updated hictools-c builders read HBS directly, with auto-detection or `-f hbs`:
+
+```sh
+hic_pre -r 1000,5000,10000 sampled.hbs.gz sampled.v9.hic chrom.sizes
+hic_v10 pre -r 1000,5000,10000 sampled.hbs.gz sampled.v10.hic chrom.sizes
+```
+
+The builders match chromosomes by name, validate lengths, and require output
+resolutions to be multiples of the export resolution. V10 preserves exact uint64
+counts through this input path; V9 retains its float32 limit. Both currently
+require BP positions to fit signed int32. HBS output is staged and published only
+after success, so an export error leaves an existing destination untouched.
 
 ## Slice Format:
 The slice format (.slc) is a binary format that contains:
