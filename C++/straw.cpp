@@ -317,7 +317,7 @@ void populateVectorWithDoubles(istream &fin, vector<double> &vector, int64_t nVa
 }
 
 int64_t readThroughExpectedVectorURL(CURL *curl, int64_t currentPointer, int32_t version, vector<double> &expectedValues, int64_t nValues,
-                               bool store, int32_t resolution) {
+                               bool store, int32_t /*resolution*/) {
     if (store) {
         int32_t bufferSize = nValues * sizeof(double) + 10000;
         if (version > 8) {
@@ -342,7 +342,7 @@ int64_t readThroughExpectedVectorURL(CURL *curl, int64_t currentPointer, int32_t
 }
 
 void readThroughExpectedVector(int32_t version, istream &fin, vector<double> &expectedValues, int64_t nValues,
-                               bool store, int32_t resolution) {
+                               bool store, int32_t /*resolution*/) {
     if (store) {
         if (version > 8) {
             populateVectorWithFloats(fin, expectedValues, nValues);
@@ -439,10 +439,10 @@ bool readFooterURL(CURL *curl, int64_t master, int32_t version, int32_t c1, int3
     memstream newFin(buffer, 100);
 
     if (version > 8) {
-        int64_t nBytes = readInt64FromFile(newFin);
+        readInt64FromFile(newFin);
         currentPointer += 8;
     } else {
-        int32_t nBytes = readInt32FromFile(newFin);
+        readInt32FromFile(newFin);
         currentPointer += 4;
     }
 
@@ -1475,6 +1475,11 @@ public:
         stream.close();
 
         if (norm != "NONE") {
+            if (c1NormEntry.size <= 0 || (!isIntra && c2NormEntry.size <= 0)) {
+                cerr << "Normalization " << norm << " is not available for the requested chromosomes, unit, and resolution" << endl;
+                foundFooter = false;
+                return;
+            }
             c1Norm = readNormalizationVectorFromFooter(c1NormEntry, version, fileName);
             if (isIntra) {
                 c2Norm = c1Norm;
@@ -1922,19 +1927,94 @@ void forEachRawObservedBlock(const string &fileName,
     delete mzd;
 }
 
+bool forEachRawObservedBlockWithNorm(const string &fileName,
+                                     const string &chromosomeName,
+                                     int32_t binsize,
+                                     const string &norm,
+                                     vector<double> &normVector,
+                                     const StrawBlockCallback &processor) {
+    HiCFile hiCFile(fileName);
+    const auto chromosomeIt = hiCFile.chromosomeMap.find(chromosomeName);
+    if (chromosomeIt == hiCFile.chromosomeMap.end()) {
+        cerr << "chromosome " << chromosomeName << " not found in the file." << endl;
+        return false;
+    }
+
+    MatrixZoomData *mzd = hiCFile.getMatrixZoomData(
+        chromosomeName, chromosomeName, "observed", norm, "BP", binsize);
+    if (mzd == nullptr || !mzd->foundFooter) {
+        delete mzd;
+        return false;
+    }
+
+    if (norm == "NONE") {
+        normVector.assign(static_cast<size_t>(mzd->numBins1) + 1, 1.0);
+    } else {
+        normVector = mzd->c1Norm;
+        if (normVector.empty()) {
+            delete mzd;
+            return false;
+        }
+    }
+
+    int64_t regionIndices[4] = {0, mzd->numBins1, 0, mzd->numBins2};
+    const set<int32_t> blockNumbers = mzd->getBlockNumbers(regionIndices);
+    HiCFileStream stream(fileName);
+    for (int32_t blockNumber : blockNumbers) {
+        const auto found = mzd->blockMap.find(blockNumber);
+        if (found == mzd->blockMap.end()) {
+            continue;
+        }
+        vector<contactRecord> blockRecords = readBlock(stream, found->second, mzd->version);
+        if (!blockRecords.empty()) {
+            processor(blockRecords);
+        }
+    }
+
+    delete mzd;
+    return true;
+}
+
+bool strawStreamRegions(const string &fileName,
+                        const string &chromosomeName,
+                        int32_t binsize,
+                        const string &norm,
+                        const vector<StrawRegion> &regions,
+                        const StrawRegionRecordCallback &callback) {
+    HiCFile hiCFile(fileName);
+    if (hiCFile.chromosomeMap.count(chromosomeName) == 0) {
+        return false;
+    }
+    MatrixZoomData *mzd = hiCFile.getMatrixZoomData(
+        chromosomeName, chromosomeName, "observed", norm, "BP", binsize);
+    if (mzd == nullptr || !mzd->foundFooter) {
+        delete mzd;
+        return false;
+    }
+    for (size_t regionIndex = 0; regionIndex < regions.size(); ++regionIndex) {
+        const StrawRegion &region = regions[regionIndex];
+        mzd->streamRecords(region.xStart, region.xEnd, region.yStart, region.yEnd,
+                           [&](const contactRecord &record) {
+                               callback(regionIndex, record);
+                           });
+    }
+    delete mzd;
+    return true;
+}
+
 int64_t getNumRecordsForFile(const string &fileName, int32_t binsize, bool interOnly) {
     HiCFile *hiCFile = new HiCFile(fileName);
     int64_t totalNumRecords = 0;
 
-    int32_t indexOffset = 0;
+    size_t indexOffset = 0;
     if (interOnly){
         indexOffset = 1;
     }
 
     vector<chromosome> chromosomes = hiCFile->getChromosomes();
-    for(int32_t i = 0; i < chromosomes.size(); i++){
+    for(size_t i = 0; i < chromosomes.size(); i++){
         if(chromosomes[i].index <= 0) continue;
-        for(int32_t j = i + indexOffset; j < chromosomes.size(); j++){
+        for(size_t j = i + indexOffset; j < chromosomes.size(); j++){
             if(chromosomes[j].index <= 0) continue;
             MatrixZoomData *mzd;
             if(chromosomes[i].index > chromosomes[j].index){
@@ -1952,7 +2032,7 @@ int64_t getNumRecordsForFile(const string &fileName, int32_t binsize, bool inter
 int64_t getNumRecordsForChromosomes(const string &fileName, int32_t binsize, bool interOnly) {
     HiCFile *hiCFile = new HiCFile(fileName);
     vector<chromosome> chromosomes = hiCFile->getChromosomes();
-    for(int32_t i = 0; i < chromosomes.size(); i++){
+    for(size_t i = 0; i < chromosomes.size(); i++){
         if(chromosomes[i].index <= 0) continue;
         MatrixZoomData *mzd = hiCFile->getMatrixZoomData(chromosomes[i].name, chromosomes[i].name, "observed", "NONE", "BP", binsize);
         int64_t totalNumRecords = mzd->getNumberOfTotalRecords();

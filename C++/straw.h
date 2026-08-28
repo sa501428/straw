@@ -122,6 +122,35 @@ void forEachRawObservedBlock(const std::string& fileName,
                              int32_t binsize,
                              const StrawBlockCallback& processor);
 
+// Streams raw observed records while also returning the normalization vector
+// loaded from the same MatrixZoomData.  This lets callers retain integer-like
+// raw counts for statistical tests and derive normalized values without a
+// second pass through the contact blocks.
+bool forEachRawObservedBlockWithNorm(const std::string& fileName,
+                                     const std::string& chromosomeName,
+                                     int32_t binsize,
+                                     const std::string& norm,
+                                     std::vector<double>& normVector,
+                                     const StrawBlockCallback& processor);
+
+struct StrawRegion {
+    int64_t xStart;
+    int64_t xEnd;
+    int64_t yStart;
+    int64_t yEnd;
+};
+
+using StrawRegionRecordCallback = std::function<void(size_t, const contactRecord&)>;
+
+// Query many regions from one matrix setup. Records are normalized according
+// to `norm`, and coordinates are returned in base pairs, as in strawStream.
+bool strawStreamRegions(const std::string& fileName,
+                        const std::string& chromosomeName,
+                        int32_t binsize,
+                        const std::string& norm,
+                        const std::vector<StrawRegion>& regions,
+                        const StrawRegionRecordCallback& callback);
+
 int64_t getNumRecordsForFile(const std::string& filename, int32_t binsize, bool interOnly);
 
 int64_t getNumRecordsForChromosomes(const std::string& filename, int32_t binsize, bool interOnly);
