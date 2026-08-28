@@ -43,4 +43,9 @@ void dumpGenomeWideDataAtResolution(const std::string& matrixType,
                                   bool compressed = true,
                                   ContactFilter filter = ContactFilter::ALL);
 
+// V10 implementation lives in straw_v10.cpp.
+void dumpV10(const std::string& matrixType, const std::string& norm,
+             const std::string& filePath, const std::string& unit, int32_t resolution,
+             const std::string& outputPath, bool compressed, ContactFilter filter);
+
 #endif 

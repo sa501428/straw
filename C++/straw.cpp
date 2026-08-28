@@ -37,6 +37,7 @@
 #include "zlib.h"
 #include "zstd.h"
 #include "straw.h"
+#include "straw_v10.h"
 #include <thread>
 #include <mutex>
 #include <future>
@@ -242,6 +243,11 @@ map<string, chromosome> readHeader(istream &fin, int64_t &masterIndexPosition, s
     }
 
     version = readInt32FromFile(fin);
+    if (version == 10) {
+        map<string, chromosome> chromosomes;
+        straw_v10::readHeader(fin, masterIndexPosition, genomeID, numChromosomes, nviPosition, nviLength, chromosomes);
+        return chromosomes;
+    }
     if (version < 6) {
         cerr << "Version " << version << " no longer supported" << endl;
         masterIndexPosition = -1;
@@ -1818,6 +1824,11 @@ void parsePositions(const string &chrLoc, string &chrom, int64_t &pos1, int64_t 
 bool strawStream(const string &matrixType, const string &norm, const string &fileName, const string &chr1loc,
                  const string &chr2loc, const string &unit, int32_t binsize,
                  const StrawRecordCallback &callback) {
+    if (straw_v10::isV10(fileName)) {
+        straw_v10::File(fileName).stream(matrixType, norm, chr1loc, chr2loc, unit, binsize, callback);
+        return true;
+    }
+
     if (!(unit == "BP" || unit == "FRAG")) {
         cerr << "Norm specified incorrectly, must be one of <BP/FRAG>" << endl;
         cerr << "Usage: straw [observed/oe/expected] <NONE/VC/VC_SQRT/KR> <hicFile(s)> <chr1>[:x1:x2] <chr2>[:y1:y2] <BP/FRAG> <binsize>"
@@ -1858,6 +1869,9 @@ vector<contactRecord> straw(const string &matrixType, const string &norm, const 
 
 vector<vector<float> > strawAsMatrix(const string &matrixType, const string &norm, const string &fileName, const string &chr1loc,
                    const string &chr2loc, const string &unit, int32_t binsize) {
+    if (straw_v10::isV10(fileName))
+        return straw_v10::File(fileName).matrix(matrixType, norm, chr1loc, chr2loc, unit, binsize);
+
     if (!(unit == "BP" || unit == "FRAG")) {
         cerr << "Norm specified incorrectly, must be one of <BP/FRAG>" << endl;
         cerr << "Usage: straw [observed/oe/expected] <NONE/VC/VC_SQRT/KR> <hicFile(s)> <chr1>[:x1:x2] <chr2>[:y1:y2] <BP/FRAG> <binsize>"
@@ -1882,11 +1896,15 @@ vector<vector<float> > strawAsMatrix(const string &matrixType, const string &nor
 }
 
 vector<chromosome> getChromosomesForFile(const string &fileName) {
+    if (straw_v10::isV10(fileName)) return straw_v10::File(fileName).chromosomes();
+
     HiCFile hiCFile(fileName);
     return hiCFile.getChromosomes();
 }
 
 vector<int32_t> getResolutionsForFile(const string &fileName) {
+    if (straw_v10::isV10(fileName)) return straw_v10::File(fileName).resolutions();
+
     HiCFile hiCFile(fileName);
     return hiCFile.getResolutions();
 }
@@ -1896,6 +1914,21 @@ void forEachRawObservedBlock(const string &fileName,
                              const string &chr2,
                              int32_t binsize,
                              const StrawBlockCallback &processor) {
+    if (straw_v10::isV10(fileName)) {
+        straw_v10::File file(fileName);
+        vector<contactRecord> batch;
+        file.raw(chr1, chr2, "BP", binsize, 0, UINT32_MAX, 0, UINT32_MAX,
+                 [&](const straw_v10::Record& r) {
+                     if (r.binX > INT32_MAX || r.binY > INT32_MAX)
+                         throw runtime_error("V10: bin coordinate exceeds legacy API; use File::raw");
+                     batch.push_back({static_cast<int32_t>(r.binX), static_cast<int32_t>(r.binY),
+                                      r.isScore ? r.score : static_cast<float>(r.count)});
+                     if (batch.size() == 8192) { processor(batch); batch.clear(); }
+                 });
+        if (!batch.empty()) processor(batch);
+        return;
+    }
+
     HiCFile hiCFile(fileName);
     string first = chr1;
     string second = chr2;
@@ -1933,6 +1966,12 @@ bool forEachRawObservedBlockWithNorm(const string &fileName,
                                      const string &norm,
                                      vector<double> &normVector,
                                      const StrawBlockCallback &processor) {
+    if (straw_v10::isV10(fileName)) {
+        normVector = straw_v10::File(fileName).normalization(chromosomeName, "BP", binsize, norm);
+        forEachRawObservedBlock(fileName, chromosomeName, chromosomeName, binsize, processor);
+        return true;
+    }
+
     HiCFile hiCFile(fileName);
     const auto chromosomeIt = hiCFile.chromosomeMap.find(chromosomeName);
     if (chromosomeIt == hiCFile.chromosomeMap.end()) {
@@ -1981,6 +2020,18 @@ bool strawStreamRegions(const string &fileName,
                         const string &norm,
                         const vector<StrawRegion> &regions,
                         const StrawRegionRecordCallback &callback) {
+    if (straw_v10::isV10(fileName)) {
+        straw_v10::File file(fileName);
+        for (size_t i = 0; i < regions.size(); ++i) {
+            const auto& r = regions[i];
+            file.stream("observed", norm,
+                        chromosomeName + ":" + to_string(r.xStart) + ":" + to_string(r.xEnd),
+                        chromosomeName + ":" + to_string(r.yStart) + ":" + to_string(r.yEnd),
+                        "BP", binsize, [&](const contactRecord& record) { callback(i, record); });
+        }
+        return true;
+    }
+
     HiCFile hiCFile(fileName);
     if (hiCFile.chromosomeMap.count(chromosomeName) == 0) {
         return false;
@@ -2003,6 +2054,8 @@ bool strawStreamRegions(const string &fileName,
 }
 
 int64_t getNumRecordsForFile(const string &fileName, int32_t binsize, bool interOnly) {
+    if (straw_v10::isV10(fileName)) return straw_v10::File(fileName).countRecords(binsize, interOnly);
+
     HiCFile *hiCFile = new HiCFile(fileName);
     int64_t totalNumRecords = 0;
 
@@ -2030,6 +2083,8 @@ int64_t getNumRecordsForFile(const string &fileName, int32_t binsize, bool inter
 }
 
 int64_t getNumRecordsForChromosomes(const string &fileName, int32_t binsize, bool interOnly) {
+    if (straw_v10::isV10(fileName)) return straw_v10::File(fileName).countRecords(binsize, false, true);
+
     HiCFile *hiCFile = new HiCFile(fileName);
     vector<chromosome> chromosomes = hiCFile->getChromosomes();
     for(size_t i = 0; i < chromosomes.size(); i++){
@@ -2111,6 +2166,11 @@ void dumpGenomeWideDataAtResolution(const std::string& matrixType,
                                   const std::string& outputPath,
                                   bool compressed,
                                   ContactFilter filter) {
+    if (straw_v10::isV10(filePath)) {
+        dumpV10(matrixType, norm, filePath, unit, resolution, outputPath, compressed, filter);
+        return;
+    }
+
     // Open HiC file
     HiCFile* hicFile = new HiCFile(filePath);
     

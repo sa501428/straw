@@ -7,7 +7,7 @@ The tool provides functionality to read .hic files and extract contact matrices 
 
 ## Installation:
 1. Requires CMake 3.13 or higher
-2. Requires libcurl and zlib development libraries
+2. Requires libcurl, zlib, and zstd development libraries, plus pkg-config
 3. Clone the repository
 4. Create a build directory: `mkdir build`
 5. Enter build directory: `cd build`
@@ -47,3 +47,83 @@ The simplified slice format is only intended for repeated analysis on a high res
 
 ## Bug Reports or Feature Requests:
 For bug reports or feature requests, please open an issue on the repository.
+## V10 files
+
+V10 support follows the consolidated `hic-format/HiCFormatV10.md` specification
+(88-byte header and page/vector indexes), not the older experimental V9-like
+block extension. V6–V9 continue to use their existing read path. The new format
+implementation is isolated in `straw_v10.cpp`, `straw_v10.h`, and `v10_binary.h`;
+CMake links it automatically. Custom builds must compile `straw_v10.cpp` alongside
+`straw.cpp` and link zstd, zlib, curl, and threads.
+
+The existing commands automatically detect V10:
+
+```sh
+straw observed NONE input.v10.hic chr1:0:100000 chr1:0:100000 BP 1000
+straw observed VC input.v10.hic chr1 chr1 BP 1000
+straw oe VC input.v10.hic chr1 chr1 BP 1000
+```
+
+Supported V10 features include materialized and derived resolutions, rectangular
+and rotated cis grids, sparse/bitmap/dense blocks, all value modes, integer
+counts and float scores, BP/FRAG metadata, and all three compressed vector
+transforms. Derived matrices aggregate raw source cells before applying the
+**target** resolution's normalization and expected vectors. Missing capabilities
+and corrupt records raise errors; a missing chromosome pair is an empty matrix.
+V10 expected/OE queries are defined for cis matrices only.
+
+V10 region ends are **exclusive**. Queries include bins overlapping the requested
+interval. Reversed chromosome queries return coordinates in the requested
+chromosome order. Cis sparse queries emit each canonical cell once, transposing
+it when only its reflected position intersects the window; `MATRIX` output fills
+both symmetric entries. FRAG locations use fragment coordinates, and reported
+coordinates are fragment-bin starts. These conventions do not change the legacy
+V6–V9 path.
+
+### Exact counts and the C++ API
+
+The raw `observed NONE` CLI prints `uint64_t` counts exactly, including values
+above 2^53. The existing `contactRecord` APIs and slice files still use `float`,
+so their returned counts can round. Use the separate exact API when integer
+precision or score bit preservation matters:
+
+```cpp
+#include "straw_v10.h"
+
+straw_v10::File file("input.v10.hic");
+file.streamRaw("chr1:0:100000", "chr1:0:100000", "BP", 1000,
+    [](const straw_v10::Record& record) {
+        // binX/binY are bin indices, not base-pair positions.
+        // isScore=false: count is the exact uint64_t value.
+        // isScore=true: score retains its stored float32 bits.
+    });
+```
+
+`File::raw` accepts half-open bin ranges directly. The existing metadata,
+streaming, region, normalization, dense-matrix, record-count, and slice entry
+points also dispatch to V10. Legacy APIs reject coordinate overflow rather than
+wrapping a 32-bit coordinate. Parsing, decompression, full vectors, and dense
+output have explicit allocation limits (512 MiB per record/allocation class).
+Large whole-matrix queries can still require substantial memory, particularly
+when aggregating a derived resolution.
+
+### Remote reads and tests
+
+HTTP(S) reading uses byte ranges and requires a server returning exact `206`
+responses with `Content-Range`. Only candidate pages and vector chunks intersecting
+the query are fetched; a server ignoring Range is rejected instead of downloading
+the whole file. Local format tests use independently generated binary fixtures:
+
+```sh
+cmake -S . -B build
+cmake --build build -j4
+ctest --test-dir build --output-on-failure
+```
+
+Python tests load the system zstd library through `ctypes`. The HTTP integration
+test starts a loopback server and is opt-in:
+
+```sh
+cmake -S . -B build -DSTRAW_TEST_HTTP=ON
+ctest --test-dir build -R v10_http_ranges --output-on-failure
+```

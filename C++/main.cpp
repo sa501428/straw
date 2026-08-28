@@ -26,6 +26,7 @@
 #include <algorithm>  // for transform
 #include <cctype>    // for tolower
 #include "straw.h"
+#include "straw_v10.h"
 #include "hic_slice.h"
 using namespace std;
 
@@ -38,7 +39,7 @@ bool containsIgnoreCase(const string& str, const string& substr) {
     return strLower.find(substrLower) != string::npos;
 }
 
-int main(int argc, char *argv[])
+static int run(int argc, char *argv[])
 {
     // Check if this is a dump command
     if (argc > 1 && string(argv[1]) == "dump") {
@@ -105,6 +106,14 @@ int main(int argc, char *argv[])
             }
             cout << endl;
         }
+    } else if (matrixType == "observed" && norm == "NONE" && straw_v10::isV10(fname)) {
+        straw_v10::File(fname).streamRaw(chr1loc, chr2loc, unit, binsize,
+            [binsize](const straw_v10::Record& record) {
+                const auto x = static_cast<unsigned long long>(record.binX) * binsize;
+                const auto y = static_cast<unsigned long long>(record.binY) * binsize;
+                if (record.isScore) printf("%llu\t%llu\t%.14g\n", x, y, record.score);
+                else printf("%llu\t%llu\t%llu\n", x, y, static_cast<unsigned long long>(record.count));
+            });
     } else {
         vector<contactRecord> records;
         records = straw(matrixType, norm, fname, chr1loc, chr2loc, unit, binsize);
@@ -112,4 +121,10 @@ int main(int argc, char *argv[])
             printf("%d\t%d\t%.14g\n", records[i].binX, records[i].binY, records[i].counts);
         }
     }
+    return 0;
+}
+
+int main(int argc, char* argv[]) {
+    try { return run(argc, argv); }
+    catch (const std::exception& e) { std::cerr << "Error: " << e.what() << std::endl; return 1; }
 }
