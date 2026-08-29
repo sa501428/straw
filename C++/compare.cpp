@@ -59,7 +59,8 @@ std::string location(const std::string &chr, uint64_t begin, uint64_t end) {
 }
 
 Cells rawCells(const std::string &path, const std::string &chr1, const std::string &chr2,
-               int32_t resolution, uint64_t x0, uint64_t x1, uint64_t y0, uint64_t y1) {
+               int32_t resolution, uint64_t x0, uint64_t x1, uint64_t y0, uint64_t y1,
+               bool v10, bool transposeLegacy) {
     Cells out;
     auto add = [&](uint64_t x, uint64_t y, double value) {
         // Legacy queries can include a bin touching the inclusive region end.
@@ -71,7 +72,7 @@ Cells rawCells(const std::string &path, const std::string &chr1, const std::stri
         out[{x / static_cast<uint64_t>(resolution), y / static_cast<uint64_t>(resolution)}] += value;
     };
     const std::string a = location(chr1, x0, x1), b = location(chr2, y0, y1);
-    if (straw_v10::isV10(path)) {
+    if (v10) {
         straw_v10::File(path).streamRaw(a, b, "BP", resolution,
             [&](const straw_v10::Record &r) {
                 double value = r.isScore ? static_cast<double>(r.score) : static_cast<double>(r.count);
@@ -79,7 +80,15 @@ Cells rawCells(const std::string &path, const std::string &chr1, const std::stri
             });
     } else {
         strawStream("observed", "NONE", path, a, b, "BP", resolution,
-            [&](const contactRecord &r) { add(r.binX, r.binY, r.counts); });
+            [&](const contactRecord &r) {
+                uint64_t x = r.binX, y = r.binY;
+                // The V6-V9 reader emits trans records in file chromosome-index
+                // order even when the caller requested the opposite order. V10
+                // emits them in request order. Put legacy records back into the
+                // requested orientation before filtering and comparing them.
+                if (transposeLegacy) std::swap(x, y);
+                add(x, y, r.counts);
+            });
     }
     return out;
 }
@@ -109,9 +118,26 @@ void compareCells(const Cells &a, const Cells &b, const Options &o, Summary &s,
 
 void compareVector(const std::string &kind, const std::string &chr, int32_t resolution,
                    const std::string &norm, const std::vector<double> &a,
-                   const std::vector<double> &b, bool exhaustive, const Options &o, Summary &s) {
+                   const std::vector<double> &b, bool exhaustive, bool firstV10, bool secondV10,
+                   size_t canonicalLength, const Options &o, Summary &s) {
     ++s.vectors;
-    if (a.size() != b.size()) {
+    auto compatibleLengths = [&]() {
+        if (a.size() == b.size()) return true;
+        if (firstV10 == secondV10) return false;
+        size_t v10 = firstV10 ? a.size() : b.size();
+        size_t legacy = firstV10 ? b.size() : a.size();
+        if (v10 != canonicalLength) return false;
+        // V9 normalization vectors commonly contain floor(length/bin)+1
+        // entries, while V10 contains exactly ceil(length/bin). The only
+        // difference is an unused trailing V9 entry when the length divides
+        // the bin size exactly.
+        if (kind == "normalization")
+            return legacy == canonicalLength + 1;
+        // V9 expected vectors commonly contain floor(maxLength/bin) entries;
+        // V10 covers every possible distance with ceil(maxLength/bin).
+        return canonicalLength && legacy + 1 == canonicalLength;
+    };
+    if (!compatibleLengths()) {
         difference(s, o, kind + " " + norm + " " + chr + " @" + std::to_string(resolution) +
                           " length " + std::to_string(a.size()) + " != " + std::to_string(b.size()));
     }
@@ -179,6 +205,7 @@ int compareMain(int argc, char *argv[]) {
     try {
         Options o = parse(argc, argv);
         Summary s;
+        bool firstV10 = straw_v10::isV10(o.first), secondV10 = straw_v10::isV10(o.second);
         auto ca = chromosomeMap(o.first), cb = chromosomeMap(o.second);
         std::set<std::string> names;
         for (const auto &x : ca) names.insert(x.first);
@@ -202,6 +229,7 @@ int compareMain(int argc, char *argv[]) {
         for (int32_t r : sa) if (sb.count(r)) resolutions.push_back(r);
         if (resolutions.empty()) throw std::runtime_error("files have no shared BP resolution");
         int32_t coarsest = *std::max_element(resolutions.begin(), resolutions.end());
+        const auto &v10Chroms = firstV10 ? ca : cb;
 
         std::cout << "Comparing " << commonChroms.size() << " chromosomes at " << resolutions.size()
                   << " shared BP resolutions (seed " << o.seed << ")\n";
@@ -219,8 +247,13 @@ int compareMain(int argc, char *argv[]) {
                         std::string context = x.name + "/" + y.name + " @" + std::to_string(resolution) +
                             " [" + std::to_string(x0) + "," + std::to_string(x1) + ")x[" +
                             std::to_string(y0) + "," + std::to_string(y1) + ")";
-                        compareCells(rawCells(o.first, x.name, y.name, resolution, x0, x1, y0, y1),
-                                     rawCells(o.second, x.name, y.name, resolution, x0, x1, y0, y1), o, s, context);
+                        compareCells(rawCells(o.first, x.name, y.name, resolution, x0, x1, y0, y1,
+                                              firstV10,
+                                              !firstV10 && ca[x.name].index > ca[y.name].index),
+                                     rawCells(o.second, x.name, y.name, resolution, x0, x1, y0, y1,
+                                              secondV10,
+                                              !secondV10 && cb[x.name].index > cb[y.name].index),
+                                     o, s, context);
                     };
                     if (exhaustive) check(0, xlen, 0, ylen);
                     else {
@@ -238,19 +271,32 @@ int compareMain(int argc, char *argv[]) {
             }
             for (const auto &chr : commonChroms) {
                 std::vector<double> a, b;
+                size_t expectedLength = 0;
+                for (const auto &entry : v10Chroms)
+                    if (entry.first != "ALL" && entry.first != "All" && entry.first != "all")
+                        expectedLength = std::max<size_t>(
+                            expectedLength,
+                            entry.second.length / uint64_t(resolution) +
+                                (entry.second.length % uint64_t(resolution) != 0));
+                size_t normalizationLength =
+                    v10Chroms.at(chr).length / uint64_t(resolution) +
+                    (v10Chroms.at(chr).length % uint64_t(resolution) != 0);
                 bool aa = getExpectedVectorForFile(o.first, chr, resolution, "NONE", a);
                 bool bb = getExpectedVectorForFile(o.second, chr, resolution, "NONE", b);
                 if (aa != bb) difference(s, o, "expected NONE availability differs for " + chr + " @" + std::to_string(resolution));
-                else if (aa) compareVector("expected", chr, resolution, "NONE", a, b, exhaustive, o, s);
+                else if (aa) compareVector("expected", chr, resolution, "NONE", a, b, exhaustive,
+                                           firstV10, secondV10, expectedLength, o, s);
                 for (const auto &norm : o.norms) {
                     aa = getNormalizationVectorForFile(o.first, chr, resolution, norm, a);
                     bb = getNormalizationVectorForFile(o.second, chr, resolution, norm, b);
                     if (aa != bb) difference(s, o, "normalization " + norm + " availability differs for " + chr + " @" + std::to_string(resolution));
-                    else if (aa) compareVector("normalization", chr, resolution, norm, a, b, exhaustive, o, s);
+                    else if (aa) compareVector("normalization", chr, resolution, norm, a, b, exhaustive,
+                                               firstV10, secondV10, normalizationLength, o, s);
                     aa = getExpectedVectorForFile(o.first, chr, resolution, norm, a);
                     bb = getExpectedVectorForFile(o.second, chr, resolution, norm, b);
                     if (aa != bb) difference(s, o, "normalized expected " + norm + " availability differs for " + chr + " @" + std::to_string(resolution));
-                    else if (aa) compareVector("expected", chr, resolution, norm, a, b, exhaustive, o, s);
+                    else if (aa) compareVector("expected", chr, resolution, norm, a, b, exhaustive,
+                                               firstV10, secondV10, expectedLength, o, s);
                 }
             }
         }
