@@ -26,6 +26,9 @@ class File {
     File &operator=(const File &) = delete;
     std::vector<chromosome> chromosomes() const;
     std::vector<int32_t> resolutions(const std::string &unit = "BP") const;
+    std::string genome() const;
+    std::vector<std::string> normalizations() const;
+    std::vector<std::pair<std::string, std::string>> attributes() const;
     // Coordinates are bin indices; end positions are exclusive. Raw counts
     // remain uint64_t, including during derived-resolution aggregation.
     void raw(const std::string &chr1, const std::string &chr2, const std::string &unit,

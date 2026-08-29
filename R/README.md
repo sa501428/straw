@@ -1,4 +1,9 @@
 # strawr
+
+`strawr` reads legacy V6-V9 files and consolidated-format V10 files. V10
+support includes derived resolutions, Zstandard-compressed blocks and vectors,
+BP and FRAG queries, normalization, and expected-value matrices. V10 interval
+ends are exclusive, as defined by the V10 format specification.
 Straw is a fast implementation of reading/dump for .hic files
 
 ## Installation

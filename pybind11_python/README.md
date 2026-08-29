@@ -3,6 +3,11 @@
 Straw is library which allows rapid streaming of contact data from .hic files. 
 To learn more about Hi-C data and 3D genomics, visit https://aidenlab.gitbook.io/juicebox/
 
+The reader supports legacy V6-V9 files and consolidated-format V10 files. V10
+queries include materialized and derived resolutions, Zstandard-compressed
+blocks and vectors, BP/FRAG units, and normalization and expected-value data.
+Region ends are exclusive for V10, matching the V10 format specification.
+
 Once you've installed the library with `pip install hic-straw`, you can import your code with `import hicstraw`. 
 
 ## New usage to directly get numpy matrix
@@ -108,4 +113,3 @@ hicstraw.straw(data_type, normalization, file, region_x, region_y, 'BP', resolut
 `resolution`: typically `2500000`, `1000000`, `500000`, `100000`, `50000`, `25000`, `10000`, `5000`, etc.<br><br>
 Note: the normalization, resolution, and chromosome/regions must already exist in the .hic to be read 
 (i.e. they are not calculated by straw, only read from the file if available)<br>
-

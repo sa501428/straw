@@ -1,2 +1,2 @@
-PKG_LIBS = -lcurl -lz
-CXX_STD = CXX11
+PKG_LIBS = -lcurl -lz -lzstd -pthread
+CXX_STD = CXX14

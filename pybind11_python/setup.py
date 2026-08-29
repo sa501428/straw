@@ -4,7 +4,7 @@ import sys
 import setuptools
 import os
 
-__version__ = '1.3.1'
+__version__ = '1.4.0'
 
 
 def read(fname):
@@ -29,7 +29,7 @@ class GetPybindInclude(object):
 ext_modules = [
     Extension(
         'hicstraw',
-        ['src/straw.cpp'],
+        ['src/straw.cpp', 'src/straw_v10.cpp'],
         include_dirs=[
             # Path to pybind11 headers
             GetPybindInclude(),
@@ -78,7 +78,7 @@ class BuildExt(build_ext):
     }
     l_opts = {
         'msvc': [],
-        'unix': ['-lcurl', '-lz'],
+        'unix': ['-lcurl', '-lz', '-lzstd', '-pthread'],
     }
 
     if sys.platform == 'darwin':

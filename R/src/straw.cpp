@@ -35,6 +35,13 @@
 #include "straw.h"
 using namespace std;
 
+bool strawIsV10(const std::string &path);
+Rcpp::DataFrame strawReadV10(const std::string &, const std::string &, const std::string &,
+                             const std::string &, const std::string &, int32_t, const std::string &);
+Rcpp::DataFrame strawChromosomesV10(const std::string &path);
+Rcpp::NumericVector strawResolutionsV10(const std::string &path);
+Rcpp::CharacterVector strawNormalizationsV10(const std::string &path);
+
 /*
   Straw: fast C++ implementation of dump. Not as fully featured as the
   Java version. Reads the .hic file, finds the appropriate matrix and slice
@@ -1232,6 +1239,8 @@ straw(std::string norm, std::string fname, std::string chr1loc, std::string chr2
     if (!(unit == "BP" || unit == "FRAG")) {
         Rcpp::stop("Norm specified incorrectly, must be one of <BP/FRAG>.\nUsage: straw <NONE/VC/VC_SQRT/KR> <hicFile(s)> <chr1>[:x1:x2] <chr2>[:y1:y2] <BP/FRAG> <binsize> [observed/oe/expected].");
     }
+    if (strawIsV10(fname))
+        return strawReadV10(norm, fname, chr1loc, chr2loc, unit, binsize, matrix);
 
     HiCFile *hiCFile = new HiCFile(std::move(fname));
 
@@ -1298,6 +1307,7 @@ vector<chromosome> getChromosomes(string fname){
 // [[Rcpp::export]]
 Rcpp::DataFrame readHicChroms(std::string fname)
 {
+  if (strawIsV10(fname)) return strawChromosomesV10(fname);
   vector<chromosome> chroms = getChromosomes(std::move(fname));
   Rcpp::NumericVector indices;
   Rcpp::StringVector names;
@@ -1320,6 +1330,7 @@ Rcpp::DataFrame readHicChroms(std::string fname)
 // [[Rcpp::export]]
 Rcpp::NumericVector readHicBpResolutions(std::string fname)
 {
+  if (strawIsV10(fname)) return strawResolutionsV10(fname);
   HiCFile *hiCFile = new HiCFile(std::move(fname));
   Rcpp::NumericVector bpResolutions;
   for (std::vector<int32_t>::iterator it = hiCFile->bpResolutions.begin(); it != hiCFile->bpResolutions.end(); ++it) {
@@ -1439,6 +1450,7 @@ Rcpp::CharacterVector readNormsFromFooter(istream &fin, int64_t master, int32_t 
 // [[Rcpp::export]]
 Rcpp::CharacterVector readHicNormTypes(std::string fname)
 {
+    if (strawIsV10(fname)) return strawNormalizationsV10(fname);
     HiCFile *hiCFile = new HiCFile(std::move(fname));
     Rcpp::CharacterVector normTypes;
     hiCFile->fin.seekg(hiCFile->master, ios::beg);
