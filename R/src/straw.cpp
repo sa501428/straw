@@ -1275,9 +1275,19 @@ straw(std::string norm, std::string fname, std::string chr1loc, std::string chr2
                                             footer.c1, footer.c2, footer.numBins1, footer.numBins2,
                                             footer.myFilePos, footer.unit, footer.norm, footer.matrixType,
                                             footer.c1Norm, footer.c2Norm, footer.expectedValues);
+    const bool transpose = hiCFile->chromosomeMap[chr1].index > hiCFile->chromosomeMap[chr2].index;
+    const bool intra = chr1 == chr2;
+    delete hiCFile;
     vector<int32_t> xActual_vec, yActual_vec;
     vector<float> counts_vec;
     for (vector<contactRecord>::iterator it=records.begin(); it!=records.end(); ++it) {
+      if (transpose) {
+        std::swap(it->binX, it->binY);
+      } else if (intra) {
+        const bool direct = it->binX >= c1pos1 && it->binX <= c1pos2 &&
+                            it->binY >= c2pos1 && it->binY <= c2pos2;
+        if (!direct) std::swap(it->binX, it->binY);
+      }
       xActual_vec.push_back(it->binX);
       yActual_vec.push_back(it->binY);
       counts_vec.push_back(it->counts);

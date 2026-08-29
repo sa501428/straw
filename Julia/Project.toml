@@ -1,0 +1,10 @@
+name = "Straw"
+uuid = "34b6f6f4-7dc2-4aed-91f6-391203bcebfd"
+authors = ["Aiden Lab"]
+version = "1.0.0"
+
+[deps]
+Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
+
+[compat]
+julia = "1.8"

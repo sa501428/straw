@@ -1,0 +1,10 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: libstraw
+Description: Stable C ABI for the straw .hic reader
+Version: 1.0.0
+Libs: -L${libdir} -lstraw
+Cflags: -I${includedir}

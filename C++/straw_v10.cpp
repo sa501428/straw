@@ -1033,6 +1033,20 @@ int64_t File::countRecords(int32_t resolution, bool interOnly, bool printByChrom
     require(total <= INT64_MAX, "record count exceeds legacy API");
     return printByChromosome ? 0 : static_cast<int64_t>(total);
 }
+
+std::vector<std::pair<std::string, int64_t>> File::countRecordsByChromosome(int32_t resolution) {
+    uint32_t ri = impl->resolutionId(0, resolution);
+    std::vector<std::pair<std::string, int64_t>> result;
+    for (uint32_t a = 0; a < impl->h.chroms.size(); ++a) {
+        if (impl->h.chroms[a].name == "All" || impl->h.chroms[a].name == "ALL")
+            continue;
+        const Zoom *z = impl->zoom({a, a}, 0, ri);
+        uint64_t n = z ? z->occupied : 0;
+        require(n <= static_cast<uint64_t>(INT64_MAX), "record count exceeds legacy API");
+        result.emplace_back(impl->h.chroms[a].name, static_cast<int64_t>(n));
+    }
+    return result;
+}
 void readHeader(std::istream &input, int64_t &master, std::string &genome, int32_t &count,
                 int64_t &nvi, int64_t &nviLength, std::map<std::string, chromosome> &chromosomes) {
     input.clear();

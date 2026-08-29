@@ -49,6 +49,7 @@ class File {
                                            const std::string &chr1loc, const std::string &chr2loc,
                                            const std::string &unit, int32_t resolution);
     int64_t countRecords(int32_t resolution, bool interOnly, bool printByChromosome = false);
+    std::vector<std::pair<std::string, int64_t>> countRecordsByChromosome(int32_t resolution);
 
   private:
     struct Impl;

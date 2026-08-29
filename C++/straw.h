@@ -30,6 +30,7 @@
 #include <vector>
 #include <map>
 #include <string>
+#include <utility>
 #include <curl/curl.h>
 
 // Forward declarations
@@ -114,7 +115,17 @@ using StrawBlockCallback = std::function<void(const std::vector<contactRecord>&)
 
 std::vector<chromosome> getChromosomesForFile(const std::string& fileName);
 
-std::vector<int32_t> getResolutionsForFile(const std::string& fileName);
+std::vector<int32_t> getResolutionsForFile(const std::string& fileName,
+                                           const std::string& unit = "BP");
+
+std::string getGenomeForFile(const std::string& fileName);
+
+int32_t getVersionForFile(const std::string& fileName);
+
+std::vector<std::string> getNormalizationsForFile(const std::string& fileName);
+
+std::vector<std::pair<std::string, std::string>> getAttributesForFile(
+    const std::string& fileName);
 
 void forEachRawObservedBlock(const std::string& fileName,
                              const std::string& chr1,
@@ -139,13 +150,15 @@ bool getNormalizationVectorForFile(const std::string& fileName,
                                    const std::string& chromosomeName,
                                    int32_t binsize,
                                    const std::string& norm,
-                                   std::vector<double>& values);
+                                   std::vector<double>& values,
+                                   const std::string& unit = "BP");
 
 bool getExpectedVectorForFile(const std::string& fileName,
                               const std::string& chromosomeName,
                               int32_t binsize,
                               const std::string& norm,
-                              std::vector<double>& values);
+                              std::vector<double>& values,
+                              const std::string& unit = "BP");
 
 struct StrawRegion {
     int64_t xStart;
@@ -169,10 +182,14 @@ int64_t getNumRecordsForFile(const std::string& filename, int32_t binsize, bool 
 
 int64_t getNumRecordsForChromosomes(const std::string& filename, int32_t binsize, bool interOnly);
 
+std::vector<std::pair<std::string, int64_t>> getRecordCountsByChromosome(
+    const std::string& filename, int32_t binsize);
+
 // Add readHeader declaration
 std::map<std::string, chromosome> readHeader(std::istream &fin, int64_t &masterIndexPosition, 
                                            std::string &genomeID, int32_t &numChromosomes, 
                                            int32_t &version, int64_t &nviPosition, 
-                                           int64_t &nviLength);
+                                           int64_t &nviLength,
+                                           std::vector<std::pair<std::string, std::string>> *attributes = nullptr);
 
 #endif

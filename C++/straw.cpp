@@ -100,7 +100,7 @@ char *getData(CURL *curl, int64_t position, int64_t chunksize) {
 bool readMagicString(istream &fin) {
     string str;
     getline(fin, str, '\0');
-    return str[0] == 'H' && str[1] == 'I' && str[2] == 'C';
+    return str.size() >= 3 && str[0] == 'H' && str[1] == 'I' && str[2] == 'C';
 }
 
 char readCharFromFile(istream &fin) {
@@ -162,8 +162,7 @@ static CURL *initCURL(const char *url) {
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
         curl_easy_setopt(curl, CURLOPT_USERAGENT, "straw");
     } else {
-        cerr << "Unable to initialize curl " << endl;
-        exit(2);
+        throw runtime_error("Unable to initialize curl");
     }
     return curl;
 }
@@ -180,14 +179,12 @@ public:
             isHttp = true;
             curl = initCURL(fileName.c_str());
             if (!curl) {
-                cerr << "URL " << fileName << " cannot be opened for reading" << endl;
-                exit(3);
+                throw runtime_error("URL " + fileName + " cannot be opened for reading");
             }
         } else {
             fin.open(fileName, fstream::in | fstream::binary);
             if (!fin) {
-                cerr << "File " << fileName << " cannot be opened for reading" << endl;
-                exit(4);
+                throw runtime_error("File " + fileName + " cannot be opened for reading");
             }
         }
     }
@@ -234,7 +231,8 @@ char *readCompressedBytesFromFile(const string &fileName, indexEntry idx) {
 // reads the header, storing the positions of the normalization vectors and returning the masterIndexPosition pointer
 map<string, chromosome> readHeader(istream &fin, int64_t &masterIndexPosition, string &genomeID,
                                    int32_t &numChromosomes, int32_t &version, int64_t &nviPosition,
-                                   int64_t &nviLength) {
+                                   int64_t &nviLength,
+                                   vector<pair<string, string>> *attributes) {
     map<string, chromosome> chromosomeMap;
     if (!readMagicString(fin)) {
         cerr << "Hi-C magic string is missing, does not appear to be a hic file" << endl;
@@ -268,6 +266,7 @@ map<string, chromosome> readHeader(istream &fin, int64_t &masterIndexPosition, s
         string key, value;
         getline(fin, key, '\0');
         getline(fin, value, '\0');
+        if (attributes) attributes->emplace_back(key, value);
     }
 
     numChromosomes = readInt32FromFile(fin);
@@ -291,14 +290,21 @@ map<string, chromosome> readHeader(istream &fin, int64_t &masterIndexPosition, s
     return chromosomeMap;
 }
 
-vector<int32_t> readResolutionsFromHeader(istream &fin) {
+void readResolutionsFromHeader(istream &fin, vector<int32_t> &bp, vector<int32_t> &frag) {
     int numBpResolutions = readInt32FromFile(fin);
-    vector<int32_t> resolutions;
     for (int i = 0; i < numBpResolutions; i++) {
-        int32_t res = readInt32FromFile(fin);
-        resolutions.push_back(res);
+        bp.push_back(readInt32FromFile(fin));
     }
-    return resolutions;
+    int numFragResolutions = readInt32FromFile(fin);
+    for (int i = 0; i < numFragResolutions; i++) {
+        frag.push_back(readInt32FromFile(fin));
+    }
+}
+
+vector<int32_t> readResolutionsFromHeader(istream &fin) {
+    vector<int32_t> bp, frag;
+    readResolutionsFromHeader(fin, bp, frag);
+    return bp;
 }
 
 //https://www.techiedelight.com/get-slice-sub-vector-from-vector-cpp/
@@ -1713,6 +1719,8 @@ public:
     int64_t nviPosition = 0LL;
     int64_t nviLength = 0LL;
     vector<int32_t> resolutions;
+    vector<int32_t> fragResolutions;
+    vector<pair<string, string>> attributes;
     static thread_local int64_t totalFileSize;
     string fileName;
 
@@ -1754,20 +1762,25 @@ public:
             char *buffer = getData(curl, 0, 100000);
             memstream bufin(buffer, 100000);
             chromosomeMap = readHeader(bufin, master, genomeID, numChromosomes,
-                                       version, nviPosition, nviLength);
-            resolutions = readResolutionsFromHeader(bufin);
+                                       version, nviPosition, nviLength, &attributes);
+            if (master < 0) {
+                curl_easy_cleanup(curl);
+                free(buffer);
+                throw runtime_error("invalid or unsupported .hic header");
+            }
+            readResolutionsFromHeader(bufin, resolutions, fragResolutions);
             curl_easy_cleanup(curl);
             free(buffer);
         } else {
             ifstream fin;
             fin.open(fileName, fstream::in | fstream::binary);
             if (!fin) {
-                cerr << "File " << fileName << " cannot be opened for reading" << endl;
-                exit(6);
+                throw runtime_error("File " + fileName + " cannot be opened for reading");
             }
             chromosomeMap = readHeader(fin, master, genomeID, numChromosomes,
-                                       version, nviPosition, nviLength);
-            resolutions = readResolutionsFromHeader(fin);
+                                       version, nviPosition, nviLength, &attributes);
+            if (master < 0) throw runtime_error("invalid or unsupported .hic header");
+            readResolutionsFromHeader(fin, resolutions, fragResolutions);
             fin.close();
         }
     }
@@ -1808,8 +1821,7 @@ void parsePositions(const string &chrLoc, string &chrom, int64_t &pos1, int64_t 
     stringstream ss(chrLoc);
     getline(ss, chrom, ':');
     if (map.count(chrom) == 0) {
-        cerr << "chromosome " << chrom << " not found in the file." << endl;
-        exit(7);
+        throw runtime_error("chromosome " + chrom + " not found in the file");
     }
 
     if (getline(ss, x, ':') && getline(ss, y, ':')) {
@@ -1942,11 +1954,38 @@ vector<chromosome> getChromosomesForFile(const string &fileName) {
     return hiCFile.getChromosomes();
 }
 
-vector<int32_t> getResolutionsForFile(const string &fileName) {
-    if (straw_v10::isV10(fileName)) return straw_v10::File(fileName).resolutions();
+vector<int32_t> getResolutionsForFile(const string &fileName, const string &unit) {
+    if (unit != "BP" && unit != "FRAG") throw invalid_argument("unit must be BP or FRAG");
+    if (straw_v10::isV10(fileName)) return straw_v10::File(fileName).resolutions(unit);
 
     HiCFile hiCFile(fileName);
-    return hiCFile.getResolutions();
+    return unit == "BP" ? hiCFile.resolutions : hiCFile.fragResolutions;
+}
+
+string getGenomeForFile(const string &fileName) {
+    if (straw_v10::isV10(fileName)) return straw_v10::File(fileName).genome();
+    return HiCFile(fileName).genomeID;
+}
+
+int32_t getVersionForFile(const string &fileName) {
+    if (straw_v10::isV10(fileName)) return 10;
+    return HiCFile(fileName).version;
+}
+
+vector<string> getNormalizationsForFile(const string &fileName) {
+    if (straw_v10::isV10(fileName)) {
+        vector<string> values = straw_v10::File(fileName).normalizations();
+        if (find(values.begin(), values.end(), "NONE") == values.end()) values.push_back("NONE");
+        return values;
+    }
+    // Legacy normalization indexes are resolution-specific and are queried by
+    // name. NONE is the only normalization guaranteed to exist in every file.
+    return {"NONE"};
+}
+
+vector<pair<string, string>> getAttributesForFile(const string &fileName) {
+    if (straw_v10::isV10(fileName)) return straw_v10::File(fileName).attributes();
+    return HiCFile(fileName).attributes;
 }
 
 void forEachRawObservedBlock(const string &fileName,
@@ -1972,7 +2011,8 @@ void forEachRawObservedBlock(const string &fileName,
     HiCFile hiCFile(fileName);
     string first = chr1;
     string second = chr2;
-    if (hiCFile.chromosomeMap[first].index > hiCFile.chromosomeMap[second].index) {
+    const bool transpose = hiCFile.chromosomeMap[first].index > hiCFile.chromosomeMap[second].index;
+    if (transpose) {
         swap(first, second);
     }
 
@@ -1993,6 +2033,11 @@ void forEachRawObservedBlock(const string &fileName,
 
         vector<contactRecord> blockRecords = readBlock(stream, found->second, mzd->version);
         if (!blockRecords.empty()) {
+            if (transpose) {
+                for (auto &record : blockRecords) {
+                    std::swap(record.binX, record.binY);
+                }
+            }
             processor(blockRecords);
         }
     }
@@ -2066,11 +2111,11 @@ public:
 
 bool getNormalizationVectorForFile(const string &fileName, const string &chromosomeName,
                                    int32_t binsize, const string &norm,
-                                   vector<double> &values) {
+                                   vector<double> &values, const string &unit) {
     values.clear();
     if (straw_v10::isV10(fileName)) {
         try {
-            values = straw_v10::File(fileName).normalization(chromosomeName, "BP", binsize, norm);
+            values = straw_v10::File(fileName).normalization(chromosomeName, unit, binsize, norm);
             return true;
         } catch (const exception &) { return false; }
     }
@@ -2082,7 +2127,7 @@ bool getNormalizationVectorForFile(const string &fileName, const string &chromos
     {
         ScopedCerrSilence silence;
         mzd = file.getMatrixZoomData(chromosomeName, chromosomeName,
-                                     "observed", norm, "BP", binsize);
+                                     "observed", norm, unit, binsize);
     }
     if (!mzd || !mzd->foundFooter || (norm != "NONE" && mzd->c1Norm.empty())) {
         delete mzd;
@@ -2096,11 +2141,11 @@ bool getNormalizationVectorForFile(const string &fileName, const string &chromos
 
 bool getExpectedVectorForFile(const string &fileName, const string &chromosomeName,
                               int32_t binsize, const string &norm,
-                              vector<double> &values) {
+                              vector<double> &values, const string &unit) {
     values.clear();
     if (straw_v10::isV10(fileName)) {
         try {
-            values = straw_v10::File(fileName).expected(chromosomeName, "BP", binsize, norm);
+            values = straw_v10::File(fileName).expected(chromosomeName, unit, binsize, norm);
             return true;
         } catch (const exception &) { return false; }
     }
@@ -2110,7 +2155,7 @@ bool getExpectedVectorForFile(const string &fileName, const string &chromosomeNa
     {
         ScopedCerrSilence silence;
         mzd = file.getMatrixZoomData(chromosomeName, chromosomeName,
-                                     "expected", norm, "BP", binsize);
+                                     "expected", norm, unit, binsize);
     }
     if (!mzd || !mzd->foundFooter || mzd->expectedValues.empty()) {
         delete mzd;
@@ -2153,7 +2198,15 @@ bool strawStreamRegions(const string &fileName,
         const StrawRegion &region = regions[regionIndex];
         mzd->streamRecords(region.xStart, region.xEnd, region.yStart, region.yEnd,
                            [&](const contactRecord &record) {
-                               callback(regionIndex, record);
+                               contactRecord oriented = record;
+                               const bool direct = oriented.binX >= region.xStart &&
+                                                   oriented.binX <= region.xEnd &&
+                                                   oriented.binY >= region.yStart &&
+                                                   oriented.binY <= region.yEnd;
+                               if (!direct) {
+                                   std::swap(oriented.binX, oriented.binY);
+                               }
+                               callback(regionIndex, oriented);
                            });
     }
     delete mzd;
@@ -2202,6 +2255,23 @@ int64_t getNumRecordsForChromosomes(const string &fileName, int32_t binsize, boo
         cout << totalNumRecords*12/1000/1000/1000 << " GB" << endl;
     }
     return 0;
+}
+
+vector<pair<string, int64_t>> getRecordCountsByChromosome(const string &fileName, int32_t binsize) {
+    if (straw_v10::isV10(fileName)) return straw_v10::File(fileName).countRecordsByChromosome(binsize);
+
+    HiCFile *hiCFile = new HiCFile(fileName);
+    vector<pair<string, int64_t>> result;
+    vector<chromosome> chromosomes = hiCFile->getChromosomes();
+    for (size_t i = 0; i < chromosomes.size(); i++) {
+        if (chromosomes[i].index <= 0) continue;
+        MatrixZoomData *mzd = hiCFile->getMatrixZoomData(chromosomes[i].name, chromosomes[i].name,
+                                                         "observed", "NONE", "BP", binsize);
+        result.emplace_back(chromosomes[i].name, mzd->getNumberOfTotalRecords());
+        delete mzd;
+    }
+    delete hiCFile;
+    return result;
 }
 
 void writeCompressedBuffer(gzFile& file, const char* buffer, size_t size) {
