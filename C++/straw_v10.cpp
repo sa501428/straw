@@ -201,6 +201,23 @@ Header parseHeader(const Bytes &bytes) {
             list.push_back(r);
         }
     }
+    auto requiredSource = [](uint32_t bin) -> uint32_t {
+        if (bin == 20 || bin == 50) return 10;
+        if (bin == 200 || bin == 500) return 100;
+        if (bin == 2000) return 1000;
+        return 0;
+    };
+    for (uint32_t i = 0; i < h.resolutions[0].size(); ++i) {
+        const auto &r = h.resolutions[0][i];
+        if (uint32_t sourceBin = requiredSource(r.bin)) {
+            auto source = std::find_if(h.resolutions[0].begin(), h.resolutions[0].end(),
+                                       [&](const Resolution &s) { return s.bin == sourceBin; });
+            require(source != h.resolutions[0].end() && r.mode &&
+                        r.source == uint32_t(source - h.resolutions[0].begin()) && !source->mode,
+                    "mandatory BP derivation policy is not satisfied");
+        }
+        require(r.bin != 500000 || !r.mode, "500 kb must be materialized");
+    }
     h.fragments.assign(h.chroms.size(), 0);
     if (!h.resolutions[1].empty())
         for (size_t i = 0; i < h.chroms.size(); ++i) {
@@ -369,12 +386,10 @@ struct File::Impl {
             require(z.unit == unit && z.ri == ri && z.bin == r.bin && z.mode == r.mode &&
                         z.aggregation == r.aggregation && z.source == r.source,
                     "resolution descriptor mismatch");
-            require(z.type <= 1 && z.grid <= 1 && (!z.grid || key.first == key.second) && z.B &&
-                        z.columns,
+            require(z.type <= 1 && z.grid == uint8_t(key.first == key.second) && z.B && z.columns,
                     "invalid matrix geometry/type");
-            if (!z.grid)
-                require(z.columns == (h.bins(key.first, unit, ri) + z.B - 1) / z.B,
-                        "invalid rectangular column count");
+            require(z.columns == (h.bins(key.first, unit, ri) + z.B - 1) / z.B,
+                    "invalid block column count");
             if (z.mode)
                 require(!z.index.pos && !z.pages && !z.blocks, "derived resolution has storage");
             else if (z.occupied)

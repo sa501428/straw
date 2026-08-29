@@ -176,13 +176,18 @@ straw observed VC input.v10.hic chr1 chr1 BP 1000
 straw oe VC input.v10.hic chr1 chr1 BP 1000
 ```
 
-Supported V10 features include materialized and derived resolutions, rectangular
-and rotated cis grids, sparse/bitmap/dense blocks, all value modes, integer
+Supported V10 features include materialized and derived resolutions, mandatory
+rotated cis grids, rectangular trans grids, sparse/bitmap/dense blocks, all value modes, integer
 counts and float scores, BP/FRAG metadata, and all three compressed vector
 transforms. Derived matrices aggregate raw source cells before applying the
 **target** resolution's normalization and expected vectors. Missing capabilities
 and corrupt records raise errors; a missing chromosome pair is an empty matrix.
 V10 expected/OE queries are defined for cis matrices only.
+
+The reader enforces the fixed high-resolution pyramid: 20 and 50 bp derive from
+10 bp, 200 and 500 bp from 100 bp, and 2 kb from 1 kb. The 500 kb level must be
+materialized. Experimental V10 files that materialized one of those five virtual
+levels are rejected as nonconforming and must be rebuilt.
 
 V10 region ends are **exclusive**. Queries include bins overlapping the requested
 interval. Reversed chromosome queries return coordinates in the requested

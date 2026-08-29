@@ -60,13 +60,16 @@ def block(rep=0, mode=2, score=False, values=(1, 1, 5), malformed=None, collisio
     return head + ps + vs
 
 def fixture(path, rep=0, mode=2, score=False, values=(1, 1, 5), malformed=None,
-            transform=0, rotated=False, frag=False, derived=True, collision=False):
+            transform=0, rotated=True, frag=False, derived=True, collision=False):
     # All data offsets are computed independently from the normative tables.
     chroms = [('chrA', 80), ('chrB', 70)]
     variable = string('test') + pack('I', 2) + string('duplicate') + string('one') + string('duplicate') + string('two')
     variable += pack('I', 2) + b''.join(string(c) + pack('Q', n) for c, n in chroms)
     res = pack('IBBHI', 10, 0, 1, 0, 0xffffffff)
-    if derived: res += pack('IBBHI', 20, 1, 1, 0, 0)
+    if derived:
+        res += (pack('IBBHI', 20, 0, 1, 0, 0xffffffff)
+                if malformed == 'mandatory-materialized'
+                else pack('IBBHI', 20, 1, 1, 0, 0))
     nr = 2 if derived else 1
     variable += pack('I', nr) + res
     variable += pack('I', 1 if frag else 0)
@@ -97,7 +100,9 @@ def fixture(path, rep=0, mode=2, score=False, values=(1, 1, 5), malformed=None,
     else: sum_bits = sum(values) & ((1 << 64)-1)
     def descriptor(unit, ri, bin_size, is_derived):
         return pack('4B3IB3xQQII2IQQ2I', unit, int(is_derived), 1, int(score), ri, bin_size,
-                    0 if is_derived else 0xffffffff, int(rotated), sum_bits, 1 if is_derived and collision else 3,
+                    0 if is_derived else 0xffffffff,
+                    0 if malformed == 'nonrotated-cis' else int(rotated),
+                    sum_bits, 1 if is_derived and collision else 3,
                     0x7fc00000, 0x7fc00000, 4, 1 if is_derived else 2,
                     0 if is_derived else index_pos, 0 if is_derived else len(idx),
                     0 if is_derived else 1, 0 if is_derived else 1)
@@ -200,7 +205,9 @@ def main():
         fixture(path, values=((1 << 53)+1, 1, 5))
         assert f'c {(1 << 53)+1}' in run([probe, path, 'raw', 'chrA', 'chrA', 10])
         assert f'0\t0\t{(1 << 53)+1}' in run([straw, 'observed', 'NONE', path, 'chrA', 'chrA', 'BP', 10])
-        for bad in ['overlong', 'duplicate', 'zero-count', 'overflow-varint', 'concat-frame', 'bad-footer', 'unknown-mode', 'invalid-source', 'short']:
+        for bad in ['overlong', 'duplicate', 'zero-count', 'overflow-varint', 'concat-frame',
+                    'bad-footer', 'unknown-mode', 'invalid-source', 'mandatory-materialized',
+                    'nonrotated-cis', 'short']:
             fixture(path, malformed=bad)
             run([straw, 'observed', 'NONE', path, 'chrA', 'chrA', 'BP', 10], ok=False)
         fixture(path, rep=2, score=True, values=(1, 2, 3), malformed='absent-score')
