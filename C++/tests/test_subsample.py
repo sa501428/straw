@@ -137,6 +137,15 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         path = pathlib.Path(tmp) / 'test.hic'
         legacy_fixture(path)
+        # All reader versions return contact axes in request order. Exercise
+        # both a trans request opposite to file chromosome order and a cis
+        # request below the stored upper triangle.
+        assert run([straw, 'observed', 'NONE', path, 'chrB', 'chrA', 'BP', 10]) == '10\t20\t2\n'
+        assert run([straw, 'observed', 'NONE', path,
+                    'chrA:20:20', 'chrA:10:10', 'BP', 10]) == '20\t10\t2\n'
+        matrix = run([straw, 'observed', 'NONE', path, 'chrB', 'chrA', 'MATRIX', 10])
+        matrix = [list(map(float, row.split())) for row in matrix.splitlines()]
+        assert matrix[1][2] == 2
         full = check(straw, path)
         check_hbs(straw, path)
         assert full.splitlines() == ['chrA\t0\tchrA\t0\t2', 'chrA\t10\tchrA\t20\t2',

@@ -59,8 +59,7 @@ std::string location(const std::string &chr, uint64_t begin, uint64_t end) {
 }
 
 Cells rawCells(const std::string &path, const std::string &chr1, const std::string &chr2,
-               int32_t resolution, uint64_t x0, uint64_t x1, uint64_t y0, uint64_t y1,
-               bool v10, bool transposeLegacy) {
+               int32_t resolution, uint64_t x0, uint64_t x1, uint64_t y0, uint64_t y1) {
     Cells out;
     auto add = [&](uint64_t x, uint64_t y, double value) {
         // Legacy queries can include a bin touching the inclusive region end.
@@ -72,7 +71,7 @@ Cells rawCells(const std::string &path, const std::string &chr1, const std::stri
         out[{x / static_cast<uint64_t>(resolution), y / static_cast<uint64_t>(resolution)}] += value;
     };
     const std::string a = location(chr1, x0, x1), b = location(chr2, y0, y1);
-    if (v10) {
+    if (straw_v10::isV10(path)) {
         straw_v10::File(path).streamRaw(a, b, "BP", resolution,
             [&](const straw_v10::Record &r) {
                 double value = r.isScore ? static_cast<double>(r.score) : static_cast<double>(r.count);
@@ -80,15 +79,7 @@ Cells rawCells(const std::string &path, const std::string &chr1, const std::stri
             });
     } else {
         strawStream("observed", "NONE", path, a, b, "BP", resolution,
-            [&](const contactRecord &r) {
-                uint64_t x = r.binX, y = r.binY;
-                // The V6-V9 reader emits trans records in file chromosome-index
-                // order even when the caller requested the opposite order. V10
-                // emits them in request order. Put legacy records back into the
-                // requested orientation before filtering and comparing them.
-                if (transposeLegacy) std::swap(x, y);
-                add(x, y, r.counts);
-            });
+            [&](const contactRecord &r) { add(r.binX, r.binY, r.counts); });
     }
     return out;
 }
@@ -247,12 +238,8 @@ int compareMain(int argc, char *argv[]) {
                         std::string context = x.name + "/" + y.name + " @" + std::to_string(resolution) +
                             " [" + std::to_string(x0) + "," + std::to_string(x1) + ")x[" +
                             std::to_string(y0) + "," + std::to_string(y1) + ")";
-                        compareCells(rawCells(o.first, x.name, y.name, resolution, x0, x1, y0, y1,
-                                              firstV10,
-                                              !firstV10 && ca[x.name].index > ca[y.name].index),
-                                     rawCells(o.second, x.name, y.name, resolution, x0, x1, y0, y1,
-                                              secondV10,
-                                              !secondV10 && cb[x.name].index > cb[y.name].index),
+                        compareCells(rawCells(o.first, x.name, y.name, resolution, x0, x1, y0, y1),
+                                     rawCells(o.second, x.name, y.name, resolution, x0, x1, y0, y1),
                                      o, s, context);
                     };
                     if (exhaustive) check(0, xlen, 0, ylen);

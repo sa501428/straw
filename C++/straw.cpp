@@ -1842,15 +1842,39 @@ bool strawStream(const string &matrixType, const string &norm, const string &fil
     parsePositions((chr1loc), chr1, origRegionIndices[0], origRegionIndices[1], hiCFile->chromosomeMap);
     parsePositions((chr2loc), chr2, origRegionIndices[2], origRegionIndices[3], hiCFile->chromosomeMap);
 
-    if (hiCFile->chromosomeMap[chr1].index > hiCFile->chromosomeMap[chr2].index) {
+    bool transpose = hiCFile->chromosomeMap[chr1].index > hiCFile->chromosomeMap[chr2].index;
+    bool intra = chr1 == chr2;
+    auto orientedCallback = [&](const contactRecord &input) {
+        contactRecord record = input;
+        if (transpose) {
+            // Matrix storage is ordered by chromosome index, but the public API
+            // returns coordinates in the chromosome order requested by the
+            // caller, as the V10 reader does.
+            std::swap(record.binX, record.binY);
+        } else if (intra) {
+            bool direct = record.binX >= origRegionIndices[0] &&
+                          record.binX <= origRegionIndices[1] &&
+                          record.binY >= origRegionIndices[2] &&
+                          record.binY <= origRegionIndices[3];
+            if (!direct) {
+                // Cis contacts are stored above the diagonal. Reflect contacts
+                // selected through the symmetric half of the query so a below-
+                // diagonal request is returned in the requested orientation.
+                std::swap(record.binX, record.binY);
+            }
+        }
+        callback(record);
+    };
+
+    if (transpose) {
         MatrixZoomData *mzd = hiCFile->getMatrixZoomData(chr2, chr1, matrixType, norm, unit, binsize);
         mzd->streamRecords(origRegionIndices[2], origRegionIndices[3], origRegionIndices[0], origRegionIndices[1],
-                           callback);
+                           orientedCallback);
         delete mzd;
     } else {
         MatrixZoomData *mzd = hiCFile->getMatrixZoomData(chr1, chr2, matrixType, norm, unit, binsize);
         mzd->streamRecords(origRegionIndices[0], origRegionIndices[1], origRegionIndices[2], origRegionIndices[3],
-                           callback);
+                           orientedCallback);
         delete mzd;
     }
     delete hiCFile;
@@ -1886,13 +1910,29 @@ vector<vector<float> > strawAsMatrix(const string &matrixType, const string &nor
     parsePositions((chr1loc), chr1, origRegionIndices[0], origRegionIndices[1], hiCFile->chromosomeMap);
     parsePositions((chr2loc), chr2, origRegionIndices[2], origRegionIndices[3], hiCFile->chromosomeMap);
 
+    vector<vector<float> > result;
     if (hiCFile->chromosomeMap[chr1].index > hiCFile->chromosomeMap[chr2].index) {
         MatrixZoomData *mzd = hiCFile->getMatrixZoomData(chr2, chr1, matrixType, norm, unit, binsize);
-        return mzd->getRecordsAsMatrix(origRegionIndices[2], origRegionIndices[3], origRegionIndices[0], origRegionIndices[1]);
+        vector<vector<float> > stored = mzd->getRecordsAsMatrix(
+            origRegionIndices[2], origRegionIndices[3], origRegionIndices[0], origRegionIndices[1]);
+        delete mzd;
+        if (stored.size() == 1 && stored[0].size() == 1) {
+            result = std::move(stored);
+        } else {
+            size_t rows = stored.size(), cols = stored[0].size();
+            result.assign(cols, vector<float>(rows, 0));
+            for (size_t r = 0; r < rows; ++r)
+                for (size_t c = 0; c < cols; ++c)
+                    result[c][r] = stored[r][c];
+        }
     } else {
         MatrixZoomData *mzd = hiCFile->getMatrixZoomData(chr1, chr2, matrixType, norm, unit, binsize);
-        return mzd->getRecordsAsMatrix(origRegionIndices[0], origRegionIndices[1], origRegionIndices[2], origRegionIndices[3]);
+        result = mzd->getRecordsAsMatrix(
+            origRegionIndices[0], origRegionIndices[1], origRegionIndices[2], origRegionIndices[3]);
+        delete mzd;
     }
+    delete hiCFile;
+    return result;
 }
 
 vector<chromosome> getChromosomesForFile(const string &fileName) {
