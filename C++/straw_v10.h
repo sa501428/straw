@@ -37,6 +37,8 @@ class File {
                    int32_t resolution, const Callback &callback);
     std::vector<double> normalization(const std::string &chr, const std::string &unit,
                                       int32_t resolution, const std::string &norm);
+    std::vector<double> expected(const std::string &chr, const std::string &unit,
+                                 int32_t resolution, const std::string &norm);
     void stream(const std::string &matrixType, const std::string &norm, const std::string &chr1loc,
                 const std::string &chr2loc, const std::string &unit, int32_t resolution,
                 const StrawRecordCallback &callback);

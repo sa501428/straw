@@ -2014,6 +2014,73 @@ bool forEachRawObservedBlockWithNorm(const string &fileName,
     return true;
 }
 
+namespace {
+class ScopedCerrSilence {
+    ostringstream sink;
+    streambuf *previous;
+public:
+    ScopedCerrSilence() : previous(cerr.rdbuf(sink.rdbuf())) {}
+    ~ScopedCerrSilence() { cerr.rdbuf(previous); }
+};
+}
+
+bool getNormalizationVectorForFile(const string &fileName, const string &chromosomeName,
+                                   int32_t binsize, const string &norm,
+                                   vector<double> &values) {
+    values.clear();
+    if (straw_v10::isV10(fileName)) {
+        try {
+            values = straw_v10::File(fileName).normalization(chromosomeName, "BP", binsize, norm);
+            return true;
+        } catch (const exception &) { return false; }
+    }
+    HiCFile file(fileName);
+    if (!file.chromosomeMap.count(chromosomeName)) return false;
+    // Capability probing is expected to fail often (normalizations are
+    // resolution-dependent), so do not emit the legacy query path's diagnostics.
+    MatrixZoomData *mzd;
+    {
+        ScopedCerrSilence silence;
+        mzd = file.getMatrixZoomData(chromosomeName, chromosomeName,
+                                     "observed", norm, "BP", binsize);
+    }
+    if (!mzd || !mzd->foundFooter || (norm != "NONE" && mzd->c1Norm.empty())) {
+        delete mzd;
+        return false;
+    }
+    if (norm == "NONE") values.assign(static_cast<size_t>(mzd->numBins1) + 1, 1.0);
+    else values = mzd->c1Norm;
+    delete mzd;
+    return true;
+}
+
+bool getExpectedVectorForFile(const string &fileName, const string &chromosomeName,
+                              int32_t binsize, const string &norm,
+                              vector<double> &values) {
+    values.clear();
+    if (straw_v10::isV10(fileName)) {
+        try {
+            values = straw_v10::File(fileName).expected(chromosomeName, "BP", binsize, norm);
+            return true;
+        } catch (const exception &) { return false; }
+    }
+    HiCFile file(fileName);
+    if (!file.chromosomeMap.count(chromosomeName)) return false;
+    MatrixZoomData *mzd;
+    {
+        ScopedCerrSilence silence;
+        mzd = file.getMatrixZoomData(chromosomeName, chromosomeName,
+                                     "expected", norm, "BP", binsize);
+    }
+    if (!mzd || !mzd->foundFooter || mzd->expectedValues.empty()) {
+        delete mzd;
+        return false;
+    }
+    values = mzd->expectedValues;
+    delete mzd;
+    return true;
+}
+
 bool strawStreamRegions(const string &fileName,
                         const string &chromosomeName,
                         int32_t binsize,

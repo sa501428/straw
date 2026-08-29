@@ -22,12 +22,50 @@ The main executable 'straw' supports three modes:
 `straw dump <observed/oe/expected> <NONE/VC/VC_SQRT/KR> <hicFile> <BP/FRAG> <binsize> <outputFile>`
 3. Subsample mode (prints weighted short text):
 `straw subsample <hicFile> <--fraction P|--contacts N> [--resolution BP] [--seed N] [--output output.hbs.gz]`
+4. Compare mode (validates two `.hic` files):
+`straw compare <first.hic> <second.hic> [options]`
 
 ## Examples:
 1. Extract specific region:
 `straw observed NONE input.hic chr1:0:1000000 chr2:0:1000000 BP 10000`
 2. Create slice file at 10kb resolution:
 `straw dump observed NONE input.hic BP 10000 output.slc`
+
+## Compare two Hi-C files
+
+`compare` checks chromosome names and lengths, advertised BP resolutions, raw
+nonzero contacts, normalization vectors, raw expected vectors, and normalized
+expected vectors. It understands both V6–V9 and V10, and uses the exact V10 raw
+API so integer counts are not rounded to float before comparison.
+
+By default every chromosome pair is checked exhaustively at shared resolutions
+of 100 kb and coarser (and always at the coarsest shared resolution). At finer
+resolutions it checks four deterministic 256-by-256-bin windows for every pair.
+Vectors are exhaustive at coarse resolutions and deterministically sampled at
+fine resolutions. `ALL` is excluded. Missing chromosomes/resolutions or a
+capability present in only one file count as differences.
+
+```sh
+# Practical thorough comparison (the default strategy).
+build/straw compare old.v9.hic new.v10.hic
+
+# Compare every stored raw cell and every vector value at every resolution.
+build/straw compare old.v9.hic new.v10.hic --all
+
+# More fine-resolution coverage and custom numerical tolerances.
+build/straw compare a.hic b.hic --samples 12 --window-bins 512 \
+  --abs-tol 1e-5 --rel-tol 1e-5 --seed 42
+
+# Probe an additional/custom normalization name. Repeating --norm replaces
+# the default VC, VC_SQRT, and KR list.
+build/straw compare a.hic b.hic --norm SCALE --norm VC
+```
+
+Other controls are `--exhaustive-at BP` and `--max-errors N`. Exit status is 0
+when the files match within tolerance, 1 when differences are found, and 2 for
+invalid arguments or an unreadable/invalid input. The summary reports the exact
+amount of matrix, cell, and vector coverage, so a sampled result is not confused
+with a byte-for-byte or fully exhaustive comparison.
 
 ## Subsample to weighted short text
 

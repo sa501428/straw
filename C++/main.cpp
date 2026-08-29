@@ -30,6 +30,7 @@
 #include "hic_slice.h"
 #include "subsample.h"
 #include "hbs.h"
+#include "compare.h"
 using namespace std;
 
 // Helper function to check argument strings
@@ -44,6 +45,7 @@ bool containsIgnoreCase(const string& str, const string& substr) {
 static int run(int argc, char *argv[])
 {
     if (argc > 1 && string(argv[1]) == "subsample") return subsampleMain(argc, argv);
+    if (argc > 1 && string(argv[1]) == "compare") return compareMain(argc, argv);
     // Check if this is a dump command
     if (argc > 1 && string(argv[1]) == "dump") {
         const bool hbs = argc >= 8 && isHbsPath(argv[7]);
@@ -93,6 +95,7 @@ static int run(int argc, char *argv[])
         cerr << "Usage: straw [observed/oe/expected] <NONE/VC/VC_SQRT/KR> <hicFile(s)> <chr1>[:x1:x2] <chr2>[:y1:y2] <BP/FRAG/MATRIX> <binsize>" << endl;
         cerr << "   or: straw dump <observed/oe/expected> <NONE/VC/VC_SQRT/KR> <hicFile> <BP/FRAG> <binsize> <outputFile>" << endl;
         cerr << "   or: straw subsample <hicFile> <--fraction P|--contacts N> [--resolution BP] [--seed N] [--output output.hbs.gz]" << endl;
+        cerr << "   or: straw compare <first.hic> <second.hic> [options]" << endl;
         exit(1);
     }
     int offset = 0;

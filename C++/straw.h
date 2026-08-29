@@ -133,6 +133,20 @@ bool forEachRawObservedBlockWithNorm(const std::string& fileName,
                                      std::vector<double>& normVector,
                                      const StrawBlockCallback& processor);
 
+// Load a complete vector without reading contact blocks. Returns false when
+// the requested capability is not present in the file.
+bool getNormalizationVectorForFile(const std::string& fileName,
+                                   const std::string& chromosomeName,
+                                   int32_t binsize,
+                                   const std::string& norm,
+                                   std::vector<double>& values);
+
+bool getExpectedVectorForFile(const std::string& fileName,
+                              const std::string& chromosomeName,
+                              int32_t binsize,
+                              const std::string& norm,
+                              std::vector<double>& values);
+
 struct StrawRegion {
     int64_t xStart;
     int64_t xEnd;

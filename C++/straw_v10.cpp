@@ -920,6 +920,19 @@ std::vector<double> File::normalization(const std::string &chr, const std::strin
     double scale = 1;
     return p.vector(0, p.normId(norm), ch, u, ri, scale);
 }
+std::vector<double> File::expected(const std::string &chr, const std::string &unit,
+                                   int32_t resolution, const std::string &norm) {
+    auto &p = *impl;
+    auto ch = p.chromosomeId(chr);
+    auto u = unitId(unit);
+    auto ri = p.resolutionId(u, resolution);
+    double scale = 1;
+    auto values = p.vector(norm == "NONE" ? 1 : 2,
+                           norm == "NONE" ? 0 : p.normId(norm), ch, u, ri, scale);
+    require(scale && std::isfinite(scale), "invalid expected-vector scale");
+    for (auto &value : values) value /= scale;
+    return values;
+}
 void File::stream(const std::string &matrixType, const std::string &norm,
                   const std::string &chr1loc, const std::string &chr2loc, const std::string &unit,
                   int32_t resolution, const StrawRecordCallback &cb) {

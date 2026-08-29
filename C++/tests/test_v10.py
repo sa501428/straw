@@ -156,6 +156,13 @@ def main():
     straw, probe = sys.argv[1:3]
     with tempfile.TemporaryDirectory() as d:
         path = pathlib.Path(d) / 'test.hic'
+        other = pathlib.Path(d) / 'other.hic'
+        fixture(path)
+        assert 'RESULT: IDENTICAL WITHIN TOLERANCE' in run(
+            [straw, 'compare', path, path, '--all'])
+        fixture(other, values=(1, 1, 6))
+        assert 'RESULT: DIFFERENT' in run(
+            [straw, 'compare', path, other, '--all'], ok=False)
         for rep in range(3):
             for mode in ([0, 1, 2] if rep < 2 else [2]):
                 values = (1, 1, 1) if mode == 0 else (1, 1, 5)
