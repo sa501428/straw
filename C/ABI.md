@@ -9,7 +9,9 @@ no C++ type, exception, or allocator crosses the boundary.
 - `straw_file_open` creates a file handle owned by the caller. Release it with
   `straw_file_close`.
 - `straw_query_prepare` creates a prepared query owned by the caller. Release
-  it with `straw_query_close`.
+  it with `straw_query_close`. It retains its own parsed reader and matrix/zoom
+  state, remains valid after the originating file handle is closed, and reuses
+  that state for every window or batch call.
 - Query, vector, dense, raw, and batch functions create one opaque result owner.
   Release it with the matching type-specific `straw_*_free` function.
 - Array accessors return borrowed pointers. They remain valid until their result
@@ -48,6 +50,13 @@ Independent file, query, and result handles may be used concurrently. A result
 must not be freed while another thread is reading its borrowed pointers. ABI v1
 does not promise that simultaneous operations on the same prepared query handle
 share mutable cached state.
+
+## Errors
+
+Native failures cross the ABI as `straw_status_t` plus an optional owned error
+message. Status selection is based on typed C++ exceptions and explicit
+capability checks; message text is descriptive only and is never parsed to
+determine the status.
 
 ## Compatibility
 

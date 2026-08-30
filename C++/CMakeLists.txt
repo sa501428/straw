@@ -4,8 +4,18 @@ set(CMAKE_CXX_STANDARD 14)            # Enable c++14 standard
 find_package(CURL REQUIRED)
 find_package(Threads REQUIRED)
 find_package(ZLIB REQUIRED)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
+find_package(zstd CONFIG QUIET)
+if(TARGET zstd::libzstd_static)
+  set(STRAW_ZSTD_TARGET zstd::libzstd_static)
+elseif(TARGET zstd::libzstd)
+  set(STRAW_ZSTD_TARGET zstd::libzstd)
+elseif(TARGET zstd::libzstd_shared)
+  set(STRAW_ZSTD_TARGET zstd::libzstd_shared)
+else()
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
+  set(STRAW_ZSTD_TARGET PkgConfig::ZSTD)
+endif()
 
 add_library(straw_core STATIC straw.cpp straw_v10.cpp hbs.cpp)
 set_target_properties(straw_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -13,7 +23,7 @@ target_include_directories(straw_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
   $<INSTALL_INTERFACE:include/straw>)
 target_link_libraries(straw_core PUBLIC
-  CURL::libcurl ZLIB::ZLIB Threads::Threads PkgConfig::ZSTD)
+  CURL::libcurl ZLIB::ZLIB Threads::Threads ${STRAW_ZSTD_TARGET})
 
 add_executable(straw_cli main.cpp subsample.cpp compare.cpp)
 set_target_properties(straw_cli PROPERTIES OUTPUT_NAME straw)

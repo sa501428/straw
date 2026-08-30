@@ -1,0 +1,99 @@
+name: Native release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  unix:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            rid: linux-x64
+          - runner: macos-13
+            rid: osx-x64
+          - runner: macos-14
+            rid: osx-arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev zlib1g-dev libzstd-dev pkg-config
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install curl zstd pkg-config
+      - name: Configure, test, and install
+        run: |
+          cmake -S C++ -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PWD/stage" -DBUILD_TESTING=ON
+          cmake --build build --config Release --parallel
+          ctest --test-dir build -C Release --output-on-failure
+          cmake --install build --config Release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libstraw-${{ matrix.rid }}
+          path: stage
+
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure, test, and install
+        shell: pwsh
+        run: |
+          vcpkg install curl:x64-windows-static zlib:x64-windows-static zstd:x64-windows-static
+          cmake -S C++ -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PWD/stage" -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static -DBUILD_TESTING=ON
+          cmake --build build --config Release --parallel
+          ctest --test-dir build -C Release --output-on-failure
+          cmake --install build --config Release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libstraw-win-x64
+          path: stage
+
+  package:
+    needs: [unix, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: libstraw-*
+          path: native-assets
+      - name: Stage native libraries into language packages
+        run: bash .github/scripts/stage_native_bindings.sh native-assets
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build release archives
+        run: |
+          mkdir -p release
+          for artifact in native-assets/libstraw-*; do
+            name=$(basename "$artifact")
+            tar -C "$artifact/stage" -czf "release/$name.tar.gz" .
+          done
+          dotnet pack dotnet/Straw/Straw.csproj -c Release -o release
+          (cd Ruby && gem build hic-straw.gemspec --output ../release/hic-straw.gem)
+          tar -czf release/Straw.jl-native.tar.gz Julia
+          tar -czf release/Hic-Straw-Perl-native.tar.gz Perl
+          tar -czf release/straw-matlab-native.tar.gz MATLAB
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-packages
+          path: release
+      - name: Publish GitHub release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" release/* --clobber

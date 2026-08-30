@@ -36,7 +36,6 @@ currently exposed through C++ entry points:
 - Exact V10 raw integer counts and stored float scores
 - Consistent contact orientation in the order requested by the user for every
   supported `.hic` version and every maintained straw flavor
-- Existing slice and HBS export operations, after the read-only API is stable
 
 The following are explicitly out of scope:
 
@@ -45,6 +44,7 @@ The following are explicitly out of scope:
 - CLI argument parsing
 - CLI text formatting
 - Independent parsers implemented in each target language
+- Slice and HBS export; these remain C++-only
 
 ## Cross-Cutting Contact Orientation Bug Fix
 
@@ -398,16 +398,8 @@ Normalization remains a UTF-8 string because normalization names are extensible.
 
 ### Export operations
 
-After the read-only API is stable, expose existing non-subsampling export
-operations through a versioned options structure:
-
-- Slice output
-- HBS output
-- Existing intra/inter filters
-- Existing compression and output options
-
-Export should retain transactional output behavior where it is already
-available. Subsampling and comparison remain outside this surface.
+Slice and HBS export remain features of the C++ CLI/library. They are not part
+of the stable C ABI and are therefore not inherited by language bindings.
 
 ## Implementation Milestones
 
@@ -504,15 +496,11 @@ Acceptance criteria:
 - Installed examples build using only installed headers and library metadata.
 - Native artifacts can be consumed without a source-tree-relative build.
 
-### Milestone 5: Export API
+### Milestone 5: Release packaging
 
-1. Add slice and HBS export options to the C ABI.
-2. Preserve existing filtering and output semantics.
-3. Test failures without leaving a partially published output file where
-   transactional behavior is promised.
-
-This milestone can follow the first language bindings if it would otherwise
-delay the high-value read/query API.
+1. Publish native `libstraw` install prefixes for supported platforms.
+2. Stage those libraries into Julia, .NET, Ruby, Perl, and MATLAB packages.
+3. Keep Slice/HBS implementation and documentation within the C++ flavor.
 
 ## Shared Conformance Suite
 
@@ -660,9 +648,8 @@ they are necessary to reach the long-term goal of one maintained parser.
 9. Implement Julia and MATLAB in parallel as the first binding wave.
 10. Validate the MATLAB MEX gateway under Octave.
 11. Implement .NET, followed by Ruby and Perl.
-12. Add slice/HBS export if it was deferred from ABI v1.
-13. Consolidate the existing Python and R native implementations.
-14. Implement Go only in response to demonstrated demand.
+12. Consolidate the existing Python and R native implementations.
+13. Implement Go only in response to demonstrated demand.
 
 ## Definition of Done
 

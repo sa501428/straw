@@ -2,6 +2,9 @@
 
 This is a C++ implementation of the Straw tool for reading Hi-C data and converting it to a simpler slice format.
 
+This is the only flavor that creates Slice (`.slc`) or HBS (`.hbs.gz`) files.
+Those formats are intentionally absent from the C ABI and language wrappers.
+
 ## Description:
 The tool provides functionality to read .hic files and extract contact matrices at specific resolutions. It can output the data in a simplified binary slice format that is more efficient for downstream processing at single high-resolutions.
 

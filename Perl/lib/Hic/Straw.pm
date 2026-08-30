@@ -3,10 +3,15 @@ use strict;
 use warnings;
 use FFI::Platypus 2.00;
 use FFI::Platypus::Buffer qw(buffer_to_scalar);
+use File::Basename qw(dirname);
+use File::Spec;
 
 our $VERSION = '1.0.0';
 my $ffi = FFI::Platypus->new(api => 2);
-$ffi->lib($ENV{LIBSTRAW_PATH} // 'straw');
+my $rid = $^O eq 'MSWin32' ? 'win-x64' : $^O eq 'darwin' ? 'osx-arm64' : 'linux-x64';
+my $filename = $^O eq 'MSWin32' ? 'straw.dll' : $^O eq 'darwin' ? 'libstraw.dylib' : 'libstraw.so';
+my $bundled = File::Spec->catfile(dirname(__FILE__), 'Straw', 'native', $rid, $filename);
+$ffi->lib($ENV{LIBSTRAW_PATH} // (-f $bundled ? $bundled : 'straw'));
 
 $ffi->attach(straw_file_open => ['string', 'opaque*', 'opaque*'] => 'int');
 $ffi->attach(straw_file_close => ['opaque'] => 'void');

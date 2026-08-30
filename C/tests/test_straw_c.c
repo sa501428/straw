@@ -40,6 +40,14 @@ int main(int argc, char **argv) {
     assert(straw_records_y(forward)[0] == straw_records_x(reverse)[0]);
     assert(straw_records_values(forward)[0] == straw_records_values(reverse)[0]);
 
+    straw_records_t *missing = NULL;
+    error = NULL;
+    assert(straw_query_records_simple(file, "observed", "NONE", "missing", "1", "BP",
+                                      2500000, &missing, &error) == STRAW_STATUS_NOT_FOUND);
+    assert(missing == NULL && error != NULL);
+    straw_error_free(error);
+    error = NULL;
+
     straw_query_t *query = NULL;
     check(straw_query_prepare(file, "observed", "NONE", "1", "1", "BP", 2500000,
                               &query, &error), error);
@@ -58,15 +66,20 @@ int main(int argc, char **argv) {
     assert(straw_chromosome_counts_values(counts) != NULL);
     straw_chromosome_counts_free(counts);
 
+    /* Prepared queries own retained reader/zoom state and outlive the file handle. */
+    straw_file_close(file);
+    file = NULL;
+    straw_records_t *retained = NULL;
+    check(straw_query_window(query, &regions[0], &retained, &error), error);
+    assert(straw_records_size(retained) > 0);
+    straw_records_free(retained);
+
     straw_batch_free(batch);
     straw_query_close(query);
     straw_records_free(reverse);
     straw_records_free(forward);
-    straw_file_close(file);
-
-    file = NULL;
     error = NULL;
-    assert(straw_file_open("this-file-does-not-exist.hic", &file, &error) != STRAW_STATUS_OK);
+    assert(straw_file_open("this-file-does-not-exist.hic", &file, &error) == STRAW_STATUS_IO_ERROR);
     assert(file == NULL);
     assert(error != NULL);
     straw_error_free(error);

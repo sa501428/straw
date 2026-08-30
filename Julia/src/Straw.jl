@@ -6,8 +6,17 @@ export HicFile, Chromosome, ContactRecords, RawRecords, PreparedQuery,
        chromosomes, resolutions, normalizations, records, dense,
        normalization_vector, expected_vector, raw_records, prepare, query, query_regions
 
+function bundled_library_candidates()
+    filename = Sys.iswindows() ? "straw.dll" : Sys.isapple() ? "libstraw.dylib" : "libstraw.so"
+    rid = Sys.iswindows() ? "win-x64" : Sys.isapple() ?
+        (Sys.ARCH === :aarch64 ? "osx-arm64" : "osx-x64") : "linux-x64"
+    root = normpath(joinpath(@__DIR__, ".."))
+    [joinpath(root, "native", rid, filename),
+     joinpath(root, "deps", "usr", "lib", filename)]
+end
+
 const libstraw = get(ENV, "LIBSTRAW_PATH", let
-    found = Libdl.find_library(["straw", "libstraw"])
+    found = Libdl.find_library(vcat(bundled_library_candidates(), ["straw", "libstraw"]))
     isempty(found) ? "libstraw" : found
 end)
 

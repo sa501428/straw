@@ -1,9 +1,20 @@
 require "ffi"
+require "rbconfig"
 
 module HicStraw
   module Native
     extend FFI::Library
-    ffi_lib ENV.fetch("LIBSTRAW_PATH", "straw")
+    platform = if RbConfig::CONFIG["host_os"] =~ /darwin/
+                 RbConfig::CONFIG["host_cpu"] =~ /arm|aarch64/ ? "osx-arm64" : "osx-x64"
+               elsif RbConfig::CONFIG["host_os"] =~ /mswin|mingw/
+                 "win-x64"
+               else
+                 "linux-x64"
+               end
+    filename = platform.start_with?("win") ? "straw.dll" :
+      (platform.start_with?("osx") ? "libstraw.dylib" : "libstraw.so")
+    bundled = File.expand_path(File.join(__dir__, "hic_straw", "native", platform, filename))
+    ffi_lib [ENV["LIBSTRAW_PATH"], bundled, "straw"].compact
 
     attach_function :straw_file_open, [:string, :pointer, :pointer], :int
     attach_function :straw_file_close, [:pointer], :void

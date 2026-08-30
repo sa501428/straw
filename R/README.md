@@ -6,6 +6,9 @@ BP and FRAG queries, normalization, and expected-value matrices. V10 interval
 ends are exclusive, as defined by the V10 format specification.
 Straw is a fast implementation of reading/dump for .hic files
 
+The R flavor exposes `.hic` metadata and sparse contact queries. It does not
+create Slice or HBS files; those outputs are C++-only.
+
 ## Installation
 ```R
 remotes::install_github("aidenlab/straw/R")

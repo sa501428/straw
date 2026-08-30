@@ -6,7 +6,9 @@
 #include <algorithm>
 #include <cstddef>
 #include <exception>
+#include <fstream>
 #include <limits>
+#include <memory>
 #include <new>
 #include <stdexcept>
 #include <string>
@@ -30,13 +32,7 @@ struct straw_file {
 };
 
 struct straw_query {
-    std::string path;
-    std::string matrix_type;
-    std::string normalization;
-    std::string first_chromosome;
-    std::string second_chromosome;
-    std::string unit;
-    int32_t resolution;
+    std::unique_ptr<StrawPreparedQuery> native;
 };
 
 struct straw_records {
@@ -90,28 +86,22 @@ straw_status_t fail(straw_status_t status, const std::string &message,
 }
 
 straw_status_t classify(const std::exception &error, straw_error_t **out_error) noexcept {
-    const std::string message = error.what();
     straw_status_t status = STRAW_STATUS_INTERNAL_ERROR;
-    if (dynamic_cast<const std::invalid_argument *>(&error)) {
+    if (const auto *typed = dynamic_cast<const StrawException *>(&error)) {
+        switch (typed->code()) {
+            case StrawErrorCode::InvalidArgument: status = STRAW_STATUS_INVALID_ARGUMENT; break;
+            case StrawErrorCode::Io: status = STRAW_STATUS_IO_ERROR; break;
+            case StrawErrorCode::UnsupportedVersion: status = STRAW_STATUS_UNSUPPORTED_VERSION; break;
+            case StrawErrorCode::CorruptFile: status = STRAW_STATUS_CORRUPT_FILE; break;
+            case StrawErrorCode::NotFound: status = STRAW_STATUS_NOT_FOUND; break;
+            case StrawErrorCode::Unavailable: status = STRAW_STATUS_UNAVAILABLE; break;
+            case StrawErrorCode::UnsupportedOperation: status = STRAW_STATUS_UNSUPPORTED_OPERATION; break;
+            case StrawErrorCode::Internal: status = STRAW_STATUS_INTERNAL_ERROR; break;
+        }
+    } else if (dynamic_cast<const std::invalid_argument *>(&error)) {
         status = STRAW_STATUS_INVALID_ARGUMENT;
-    } else if (message.find("cannot be opened") != std::string::npos ||
-               message.find("curl") != std::string::npos ||
-               message.find("HTTP") != std::string::npos) {
-        status = STRAW_STATUS_IO_ERROR;
-    } else if (message.find("not found") != std::string::npos) {
-        status = STRAW_STATUS_NOT_FOUND;
-    } else if (message.find("not available") != std::string::npos ||
-               message.find("unavailable") != std::string::npos) {
-        status = STRAW_STATUS_UNAVAILABLE;
-    } else if (message.find("unsupported") != std::string::npos) {
-        status = STRAW_STATUS_UNSUPPORTED_OPERATION;
-    } else if (message.find("invalid") != std::string::npos ||
-               message.find("corrupt") != std::string::npos ||
-               message.find("truncated") != std::string::npos ||
-               message.find("magic") != std::string::npos) {
-        status = STRAW_STATUS_CORRUPT_FILE;
     }
-    return fail(status, message, out_error);
+    return fail(status, error.what(), out_error);
 }
 
 straw_status_t allocation_failure(straw_error_t **out_error) noexcept {
@@ -119,6 +109,52 @@ straw_status_t allocation_failure(straw_error_t **out_error) noexcept {
 }
 
 bool valid_text(const char *value) { return value && *value; }
+
+std::string chromosome_from_location(const std::string &value) {
+    return value.substr(0, value.find(':'));
+}
+
+bool has_chromosome(const straw_file &file, const std::string &name) {
+    return std::any_of(file.chromosomes.begin(), file.chromosomes.end(),
+                       [&](const chromosome &value) { return value.name == name; });
+}
+
+void validate_query_capabilities(const straw_file &file, const std::string &matrix_type,
+                                 const std::string &normalization, const std::string &first,
+                                 const std::string &second, const std::string &unit,
+                                 int32_t resolution) {
+    if (matrix_type != "observed" && matrix_type != "oe" && matrix_type != "expected")
+        throw StrawException(StrawErrorCode::InvalidArgument,
+                             "matrix type must be observed, oe, or expected");
+    if (unit != "BP" && unit != "FRAG")
+        throw StrawException(StrawErrorCode::InvalidArgument, "unit must be BP or FRAG");
+    if (!has_chromosome(file, chromosome_from_location(first)) ||
+        !has_chromosome(file, chromosome_from_location(second)))
+        throw StrawException(StrawErrorCode::NotFound,
+                             "requested chromosome is not present in the file");
+    const auto &resolutions = unit == "BP" ? file.bp_resolutions : file.frag_resolutions;
+    if (std::find(resolutions.begin(), resolutions.end(), resolution) == resolutions.end())
+        throw StrawException(StrawErrorCode::Unavailable,
+                             "requested resolution is not available");
+    if (file.version == 10 && normalization != "NONE" &&
+        std::find(file.normalizations.begin(), file.normalizations.end(), normalization) ==
+            file.normalizations.end())
+        throw StrawException(StrawErrorCode::Unavailable,
+                             "requested normalization is not available");
+}
+
+template <typename Function>
+auto native_file_call(const straw_file &file, Function function) -> decltype(function()) {
+    try {
+        return function();
+    } catch (const StrawException &) {
+        throw;
+    } catch (const std::exception &error) {
+        const bool remote = file.path.compare(0, 4, "http") == 0;
+        throw StrawException(remote ? StrawErrorCode::Io : StrawErrorCode::CorruptFile,
+                             error.what());
+    }
+}
 
 straw_status_t validate_options(const straw_query_options_t *options,
                                 straw_error_t **out_error) {
@@ -152,6 +188,17 @@ straw_records *read_records(const std::string &path, const std::string &matrix_t
         result->values.push_back(record.counts);
     }
     return result;
+}
+
+straw_records *read_records(StrawPreparedQuery &query, int64_t x_start, int64_t x_end,
+                            int64_t y_start, int64_t y_end) {
+    std::unique_ptr<straw_records> result(new straw_records);
+    query.streamWindow(x_start, x_end, y_start, y_end, [&](const contactRecord &record) {
+        result->x.push_back(record.binX);
+        result->y.push_back(record.binY);
+        result->values.push_back(record.counts);
+    });
+    return result.release();
 }
 
 template <typename Function>
@@ -211,9 +258,17 @@ straw_status_t straw_file_open(const char *path_or_url, straw_file_t **out_file,
         straw_file *file = new straw_file;
         try {
             file->path = path_or_url;
+            const bool remote = file->path.compare(0, 4, "http") == 0;
+            if (!remote) {
+                std::ifstream input(file->path, std::ios::binary);
+                if (!input)
+                    throw StrawException(StrawErrorCode::Io,
+                                         "file cannot be opened for reading");
+            }
             file->version = getVersionForFile(file->path);
             if (file->version < 6 || file->version > 10) {
-                throw std::runtime_error("unsupported .hic version");
+                throw StrawException(StrawErrorCode::UnsupportedVersion,
+                                     "unsupported .hic version");
             }
             file->genome = getGenomeForFile(file->path);
             file->chromosomes = getChromosomesForFile(file->path);
@@ -222,8 +277,17 @@ straw_status_t straw_file_open(const char *path_or_url, straw_file_t **out_file,
             file->normalizations = getNormalizationsForFile(file->path);
             file->attributes = getAttributesForFile(file->path);
             if (file->chromosomes.empty()) {
-                throw std::runtime_error("invalid or empty .hic chromosome table");
+                throw StrawException(StrawErrorCode::CorruptFile,
+                                     "invalid or empty .hic chromosome table");
             }
+        } catch (const StrawException &) {
+            delete file;
+            throw;
+        } catch (const std::exception &error) {
+            const bool remote = file->path.compare(0, 4, "http") == 0;
+            delete file;
+            throw StrawException(remote ? StrawErrorCode::Io : StrawErrorCode::CorruptFile,
+                                 error.what());
         } catch (...) {
             delete file;
             throw;
@@ -285,9 +349,14 @@ straw_status_t straw_query_records(const straw_file_t *file, const straw_query_o
     straw_status_t status = validate_options(options, out_error);
     if (status != STRAW_STATUS_OK) return status;
     return guarded(out_error, [&] {
-        *out_records = read_records(file->path, options->matrix_type, options->normalization,
-                                    options->first_location, options->second_location, options->unit,
-                                    options->resolution);
+        validate_query_capabilities(*file, options->matrix_type, options->normalization,
+                                    options->first_location, options->second_location,
+                                    options->unit, options->resolution);
+        *out_records = native_file_call(*file, [&] {
+            return read_records(file->path, options->matrix_type, options->normalization,
+                                options->first_location, options->second_location, options->unit,
+                                options->resolution);
+        });
     });
 }
 
@@ -315,9 +384,14 @@ straw_status_t straw_query_dense(const straw_file_t *file, const straw_query_opt
     straw_status_t status = validate_options(options, out_error);
     if (status != STRAW_STATUS_OK) return status;
     return guarded(out_error, [&] {
-        auto source = strawAsMatrix(options->matrix_type, options->normalization, file->path,
-                                    options->first_location, options->second_location, options->unit,
-                                    options->resolution);
+        validate_query_capabilities(*file, options->matrix_type, options->normalization,
+                                    options->first_location, options->second_location,
+                                    options->unit, options->resolution);
+        auto source = native_file_call(*file, [&] {
+            return strawAsMatrix(options->matrix_type, options->normalization, file->path,
+                                 options->first_location, options->second_location, options->unit,
+                                 options->resolution);
+        });
         straw_dense_matrix *matrix = new straw_dense_matrix;
         matrix->rows = source.size();
         matrix->columns = source.empty() ? 0 : source.front().size();
@@ -329,7 +403,8 @@ straw_status_t straw_query_dense(const straw_file_t *file, const straw_query_opt
         for (const auto &row : source) {
             if (row.size() != matrix->columns) {
                 delete matrix;
-                throw std::runtime_error("non-rectangular native dense result");
+                throw StrawException(StrawErrorCode::CorruptFile,
+                                     "non-rectangular native dense result");
             }
             matrix->values.insert(matrix->values.end(), row.begin(), row.end());
         }
@@ -352,13 +427,18 @@ straw_status_t straw_file_normalization_vector(const straw_file_t *file, const c
         resolution <= 0 || !out_vector)
         return fail(STRAW_STATUS_INVALID_ARGUMENT, "invalid vector arguments", out_error);
     return guarded(out_error, [&] {
-        straw_vector *result = new straw_vector;
-        if (!getNormalizationVectorForFile(file->path, chromosome, resolution, normalization,
-                                           result->values, unit)) {
-            delete result;
-            throw std::runtime_error("normalization vector is not available");
+        validate_query_capabilities(*file, "observed", normalization, chromosome, chromosome,
+                                    unit, resolution);
+        std::unique_ptr<straw_vector> result(new straw_vector);
+        bool available = native_file_call(*file, [&] {
+            return getNormalizationVectorForFile(file->path, chromosome, resolution,
+                                                 normalization, result->values, unit);
+        });
+        if (!available) {
+            throw StrawException(StrawErrorCode::Unavailable,
+                                 "normalization vector is not available");
         }
-        *out_vector = result;
+        *out_vector = result.release();
     });
 }
 
@@ -372,13 +452,18 @@ straw_status_t straw_file_expected_vector(const straw_file_t *file, const char *
         resolution <= 0 || !out_vector)
         return fail(STRAW_STATUS_INVALID_ARGUMENT, "invalid vector arguments", out_error);
     return guarded(out_error, [&] {
-        straw_vector *result = new straw_vector;
-        if (!getExpectedVectorForFile(file->path, chromosome, resolution, normalization,
-                                      result->values, unit)) {
-            delete result;
-            throw std::runtime_error("expected vector is not available");
+        validate_query_capabilities(*file, "expected", normalization, chromosome, chromosome,
+                                    unit, resolution);
+        std::unique_ptr<straw_vector> result(new straw_vector);
+        bool available = native_file_call(*file, [&] {
+            return getExpectedVectorForFile(file->path, chromosome, resolution,
+                                            normalization, result->values, unit);
+        });
+        if (!available) {
+            throw StrawException(StrawErrorCode::Unavailable,
+                                 "expected vector is not available");
         }
-        *out_vector = result;
+        *out_vector = result.release();
     });
 }
 
@@ -398,16 +483,21 @@ straw_status_t straw_query_raw(const straw_file_t *file, const char *first_locat
         return fail(STRAW_STATUS_UNSUPPORTED_OPERATION,
                     "exact raw records are available only for V10 files", out_error);
     return guarded(out_error, [&] {
+        validate_query_capabilities(*file, "observed", "NONE", first_location,
+                                    second_location, unit, resolution);
         straw_raw_records *result = new straw_raw_records;
         try {
-            straw_v10::File native(file->path);
-            native.streamRaw(first_location, second_location, unit, resolution,
+            native_file_call(*file, [&] {
+                straw_v10::File native(file->path);
+                native.streamRaw(first_location, second_location, unit, resolution,
                              [&](const straw_v10::Record &record) {
                 result->x.push_back(record.binX);
                 result->y.push_back(record.binY);
                 result->counts.push_back(record.isScore ? 0 : record.count);
                 result->scores.push_back(record.isScore ? record.score : 0.0f);
                 result->kinds.push_back(record.isScore ? STRAW_RAW_SCORE : STRAW_RAW_COUNT);
+            });
+                return true;
             });
         } catch (...) {
             delete result;
@@ -437,8 +527,11 @@ straw_status_t straw_query_prepare(const straw_file_t *file, const char *matrix_
         resolution <= 0 || !out_query)
         return fail(STRAW_STATUS_INVALID_ARGUMENT, "invalid prepared query arguments", out_error);
     return guarded(out_error, [&] {
-        *out_query = new straw_query{file->path, matrix_type, normalization, first_chromosome,
-                                     second_chromosome, unit, resolution};
+        std::unique_ptr<straw_query> query(new straw_query);
+        query->native.reset(new StrawPreparedQuery(file->path, matrix_type, normalization,
+                                                   first_chromosome, second_chromosome,
+                                                   unit, resolution));
+        *out_query = query.release();
     });
 }
 
@@ -452,10 +545,8 @@ straw_status_t straw_query_window(const straw_query_t *query, const straw_region
         region->x_end < region->x_start || region->y_end < region->y_start)
         return fail(STRAW_STATUS_INVALID_ARGUMENT, "invalid query window", out_error);
     return guarded(out_error, [&] {
-        *out_records = read_records(query->path, query->matrix_type, query->normalization,
-                                    location(query->first_chromosome, region->x_start, region->x_end),
-                                    location(query->second_chromosome, region->y_start, region->y_end),
-                                    query->unit, query->resolution);
+        *out_records = read_records(*query->native, region->x_start, region->x_end,
+                                    region->y_start, region->y_end);
     });
 }
 
@@ -477,11 +568,8 @@ straw_status_t straw_query_regions(const straw_query_t *query, const straw_regio
                 if (region.x_start < 0 || region.y_start < 0 || region.x_end < region.x_start ||
                     region.y_end < region.y_start)
                     throw std::invalid_argument("invalid region in batch query");
-                straw_records *records = read_records(
-                    query->path, query->matrix_type, query->normalization,
-                    location(query->first_chromosome, region.x_start, region.x_end),
-                    location(query->second_chromosome, region.y_start, region.y_end), query->unit,
-                    query->resolution);
+                straw_records *records = read_records(*query->native,
+                    region.x_start, region.x_end, region.y_start, region.y_end);
                 batch->x.insert(batch->x.end(), records->x.begin(), records->x.end());
                 batch->y.insert(batch->y.end(), records->y.begin(), records->y.end());
                 batch->values.insert(batch->values.end(), records->values.begin(), records->values.end());
@@ -512,7 +600,8 @@ straw_status_t straw_file_record_count(const straw_file_t *file, int32_t resolut
         return fail(STRAW_STATUS_INVALID_ARGUMENT, "invalid record count arguments", out_error);
     return guarded(out_error, [&] {
         int64_t count = getNumRecordsForFile(file->path, resolution, inter_only != 0);
-        if (count < 0) throw std::runtime_error("negative native record count");
+        if (count < 0) throw StrawException(StrawErrorCode::CorruptFile,
+                                            "negative native record count");
         *out_count = static_cast<uint64_t>(count);
     });
 }

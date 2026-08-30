@@ -47,6 +47,11 @@
 
 using namespace std;
 
+StrawException::StrawException(StrawErrorCode code, const string &message)
+    : runtime_error(message), errorCode(code) {}
+
+StrawErrorCode StrawException::code() const noexcept { return errorCode; }
+
 /*
   Straw: fast C++ implementation of dump. Not as fully featured as the
   Java version. Reads the .hic file, finds the appropriate matrix and slice
@@ -1831,6 +1836,145 @@ void parsePositions(const string &chrLoc, string &chrom, int64_t &pos1, int64_t 
         pos1 = 0LL;
         pos2 = map[chrom].length;
     }
+}
+
+struct StrawPreparedQuery::Impl {
+    string fileName;
+    string matrixType;
+    string normalization;
+    string firstChromosome;
+    string secondChromosome;
+    string unit;
+    int32_t resolution;
+    bool transpose = false;
+    bool intra = false;
+    unique_ptr<HiCFile> legacyFile;
+    unique_ptr<MatrixZoomData> legacyZoom;
+    unique_ptr<straw_v10::File> v10File;
+
+    Impl(const string &path, const string &type, const string &norm,
+         const string &first, const string &second, const string &queryUnit,
+         int32_t queryResolution)
+        : fileName(path), matrixType(type), normalization(norm),
+          firstChromosome(first), secondChromosome(second), unit(queryUnit),
+          resolution(queryResolution) {
+        if (path.empty() || first.empty() || second.empty() || queryResolution <= 0)
+            throw StrawException(StrawErrorCode::InvalidArgument, "invalid prepared query arguments");
+        if (queryUnit != "BP" && queryUnit != "FRAG")
+            throw StrawException(StrawErrorCode::InvalidArgument, "unit must be BP or FRAG");
+        if (type != "observed" && type != "oe" && type != "expected")
+            throw StrawException(StrawErrorCode::InvalidArgument,
+                                 "matrix type must be observed, oe, or expected");
+
+        const bool remote = path.compare(0, 4, "http") == 0;
+        if (!remote) {
+            ifstream input(path, ios::binary);
+            if (!input)
+                throw StrawException(StrawErrorCode::Io, "file cannot be opened for reading");
+        }
+
+        try {
+            if (straw_v10::isV10(path)) {
+                v10File.reset(new straw_v10::File(path));
+                const vector<chromosome> chromosomes = v10File->chromosomes();
+                auto hasChromosome = [&](const string &name) {
+                    return any_of(chromosomes.begin(), chromosomes.end(),
+                                  [&](const chromosome &value) { return value.name == name; });
+                };
+                if (!hasChromosome(first) || !hasChromosome(second))
+                    throw StrawException(StrawErrorCode::NotFound,
+                                         "requested chromosome is not present in the file");
+                const vector<int32_t> resolutions = v10File->resolutions(queryUnit);
+                if (find(resolutions.begin(), resolutions.end(), queryResolution) == resolutions.end())
+                    throw StrawException(StrawErrorCode::Unavailable,
+                                         "requested resolution is not available");
+                vector<string> norms = v10File->normalizations();
+                if (norm != "NONE" && find(norms.begin(), norms.end(), norm) == norms.end())
+                    throw StrawException(StrawErrorCode::Unavailable,
+                                         "requested normalization is not available");
+                return;
+            }
+
+            legacyFile.reset(new HiCFile(path));
+            if (legacyFile->version < 6 || legacyFile->version > 9)
+                throw StrawException(StrawErrorCode::UnsupportedVersion,
+                                     "unsupported .hic version");
+            auto firstIt = legacyFile->chromosomeMap.find(first);
+            auto secondIt = legacyFile->chromosomeMap.find(second);
+            if (firstIt == legacyFile->chromosomeMap.end() ||
+                secondIt == legacyFile->chromosomeMap.end())
+                throw StrawException(StrawErrorCode::NotFound,
+                                     "requested chromosome is not present in the file");
+            const vector<int32_t> &resolutions = queryUnit == "BP"
+                ? legacyFile->resolutions : legacyFile->fragResolutions;
+            if (find(resolutions.begin(), resolutions.end(), queryResolution) == resolutions.end())
+                throw StrawException(StrawErrorCode::Unavailable,
+                                     "requested resolution is not available");
+            transpose = firstIt->second.index > secondIt->second.index;
+            intra = first == second;
+            const string &storedFirst = transpose ? second : first;
+            const string &storedSecond = transpose ? first : second;
+            legacyZoom.reset(legacyFile->getMatrixZoomData(
+                storedFirst, storedSecond, type, norm, queryUnit, queryResolution));
+            if (!legacyZoom || !legacyZoom->foundFooter)
+                throw StrawException(StrawErrorCode::Unavailable,
+                                     "requested matrix or normalization is not available");
+        } catch (const StrawException &) {
+            throw;
+        } catch (const exception &error) {
+            throw StrawException(remote ? StrawErrorCode::Io : StrawErrorCode::CorruptFile,
+                                 error.what());
+        }
+    }
+
+    void stream(int64_t xStart, int64_t xEnd, int64_t yStart, int64_t yEnd,
+                const StrawRecordCallback &callback) {
+        try {
+            if (v10File) {
+                v10File->stream(matrixType, normalization,
+                    firstChromosome + ":" + to_string(xStart) + ":" + to_string(xEnd),
+                    secondChromosome + ":" + to_string(yStart) + ":" + to_string(yEnd),
+                    unit, resolution, callback);
+                return;
+            }
+            auto orientedCallback = [&](const contactRecord &input) {
+                contactRecord record = input;
+                if (transpose) {
+                    swap(record.binX, record.binY);
+                } else if (intra) {
+                    const bool direct = record.binX >= xStart && record.binX <= xEnd &&
+                                        record.binY >= yStart && record.binY <= yEnd;
+                    if (!direct) swap(record.binX, record.binY);
+                }
+                callback(record);
+            };
+            if (transpose)
+                legacyZoom->streamRecords(yStart, yEnd, xStart, xEnd, orientedCallback);
+            else
+                legacyZoom->streamRecords(xStart, xEnd, yStart, yEnd, orientedCallback);
+        } catch (const StrawException &) {
+            throw;
+        } catch (const exception &error) {
+            throw StrawException(StrawErrorCode::CorruptFile, error.what());
+        }
+    }
+};
+
+StrawPreparedQuery::StrawPreparedQuery(const string &fileName, const string &matrixType,
+                                       const string &normalization, const string &firstChromosome,
+                                       const string &secondChromosome, const string &unit,
+                                       int32_t resolution)
+    : impl(new Impl(fileName, matrixType, normalization, firstChromosome,
+                    secondChromosome, unit, resolution)) {}
+
+StrawPreparedQuery::~StrawPreparedQuery() = default;
+
+void StrawPreparedQuery::streamWindow(int64_t xStart, int64_t xEnd,
+                                      int64_t yStart, int64_t yEnd,
+                                      const StrawRecordCallback &callback) {
+    if (xStart < 0 || yStart < 0 || xEnd < xStart || yEnd < yStart)
+        throw StrawException(StrawErrorCode::InvalidArgument, "invalid query window");
+    impl->stream(xStart, xEnd, yStart, yEnd, callback);
 }
 
 bool strawStream(const string &matrixType, const string &norm, const string &fileName, const string &chr1loc,

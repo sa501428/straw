@@ -29,6 +29,8 @@
 #include <set>
 #include <vector>
 #include <map>
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <curl/curl.h>
@@ -101,6 +103,48 @@ std::vector<contactRecord> straw(const std::string& matrixType, const std::strin
                                int32_t binsize);
 
 using StrawRecordCallback = std::function<void(const contactRecord&)>;
+
+enum class StrawErrorCode {
+    InvalidArgument,
+    Io,
+    UnsupportedVersion,
+    CorruptFile,
+    NotFound,
+    Unavailable,
+    UnsupportedOperation,
+    Internal
+};
+
+class StrawException : public std::runtime_error {
+public:
+    StrawException(StrawErrorCode code, const std::string &message);
+    StrawErrorCode code() const noexcept;
+private:
+    StrawErrorCode errorCode;
+};
+
+// Retains the parsed file header and prepared matrix/zoom state across window
+// calls. This is the native state held by the stable C straw_query_t handle.
+class StrawPreparedQuery {
+public:
+    StrawPreparedQuery(const std::string &fileName,
+                       const std::string &matrixType,
+                       const std::string &normalization,
+                       const std::string &firstChromosome,
+                       const std::string &secondChromosome,
+                       const std::string &unit,
+                       int32_t resolution);
+    ~StrawPreparedQuery();
+    StrawPreparedQuery(const StrawPreparedQuery &) = delete;
+    StrawPreparedQuery &operator=(const StrawPreparedQuery &) = delete;
+
+    void streamWindow(int64_t xStart, int64_t xEnd, int64_t yStart, int64_t yEnd,
+                      const StrawRecordCallback &callback);
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl;
+};
 
 bool strawStream(const std::string& matrixType, const std::string& norm, const std::string& fname,
                  const std::string& chr1loc, const std::string& chr2loc, const std::string& unit,
