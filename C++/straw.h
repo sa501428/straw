@@ -61,14 +61,16 @@ struct chromosome {
 
 // this is for creating a stream from a byte array for ease of use
 // see https://stackoverflow.com/questions/41141175/how-to-implement-seekg-seekpos-on-an-in-memory-buffer
+// Length is size_t: buffer sizes here come from int64_t index entries, and
+// narrowing to int32_t could yield a negative length and egptr() < eback().
 struct membuf : std::streambuf {
-    membuf(char *begin, int32_t l) {
+    membuf(char *begin, std::size_t l) {
         setg(begin, begin, begin + l);
     }
 };
 
 struct memstream : virtual membuf, std::istream {
-    memstream(char *begin, int32_t l) :
+    memstream(char *begin, std::size_t l) :
             membuf(begin, l),
             std::istream(static_cast<std::streambuf*>(this)) {
     }
@@ -77,17 +79,25 @@ struct memstream : virtual membuf, std::istream {
         return seekoff(sp - std::istream::pos_type(std::istream::off_type(0)), std::ios_base::beg, which);
     }
 
+    // Every seek is clamped to [eback(), egptr()]. Callers routinely skip over
+    // sections using sizes read from the file, so an out-of-range offset must
+    // saturate rather than move gptr outside the buffer.
     std::istream::pos_type seekoff(std::istream::off_type off,
                                     std::ios_base::seekdir dir,
                                     std::ios_base::openmode which = std::ios_base::in) override {
         (void)which;
+        const std::istream::off_type size = egptr() - eback();
+        std::istream::off_type target;
         if (dir == std::ios_base::cur)
-            gbump(off);
+            target = (gptr() - eback()) + off;
         else if (dir == std::ios_base::end)
-            setg(eback(), egptr() + off, egptr());
-        else if (dir == std::ios_base::beg)
-            setg(eback(), eback() + off, egptr());
-        return gptr() - eback();
+            target = size + off;
+        else
+            target = off;
+        if (target < 0) target = 0;
+        if (target > size) target = size;
+        setg(eback(), eback() + target, egptr());
+        return target;
     }
 };
 
@@ -171,6 +181,21 @@ std::vector<std::string> getNormalizationsForFile(const std::string& fileName);
 std::vector<std::pair<std::string, std::string>> getAttributesForFile(
     const std::string& fileName);
 
+// Everything the per-file accessors above return, gathered from a single open.
+// Calling them individually costs two file opens each (an isV10 probe plus a
+// reader), which over HTTP is two round trips per property.
+struct StrawFileInfo {
+    int32_t version = 0;
+    std::string genome;
+    std::vector<chromosome> chromosomes;
+    std::vector<int32_t> bpResolutions;
+    std::vector<int32_t> fragResolutions;
+    std::vector<std::string> normalizations;
+    std::vector<std::pair<std::string, std::string>> attributes;
+};
+
+StrawFileInfo getFileInfo(const std::string& fileName);
+
 void forEachRawObservedBlock(const std::string& fileName,
                              const std::string& chr1,
                              const std::string& chr2,
@@ -187,6 +212,27 @@ bool forEachRawObservedBlockWithNorm(const std::string& fileName,
                                      const std::string& norm,
                                      std::vector<double>& normVector,
                                      const StrawBlockCallback& processor);
+
+// Reads raw observed blocks for many chromosome pairs while holding the parsed
+// header and a single open stream. forEachRawObservedBlock re-opens the file and
+// re-parses the header for every call, which costs one round trip per pair over
+// HTTP; callers sweeping the whole genome should use this instead.
+class StrawRawReader {
+public:
+    explicit StrawRawReader(const std::string& fileName);
+    ~StrawRawReader();
+    StrawRawReader(const StrawRawReader&) = delete;
+    StrawRawReader& operator=(const StrawRawReader&) = delete;
+
+    // Returns false when the pair or resolution is unavailable. Records are
+    // returned in the caller's chromosome order, as forEachRawObservedBlock does.
+    bool forEachBlock(const std::string& chr1, const std::string& chr2, int32_t binsize,
+                      const StrawBlockCallback& processor);
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl;
+};
 
 // Load a complete vector without reading contact blocks. Returns false when
 // the requested capability is not present in the file.

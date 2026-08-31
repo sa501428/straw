@@ -1,4 +1,5 @@
 #include "subsample.h"
+#include "straw.h"
 #include "straw_v10.h"
 #include "hbs.h"
 
@@ -131,7 +132,9 @@ static int exportCounts(const std::string& path, double probability, bool contac
                         uint64_t target, uint64_t seed, int32_t resolution, bool resolutionSet,
                         const std::string& output, ContactFilter filter) {
     std::unique_ptr<straw_v10::File> v10;
+    std::unique_ptr<StrawRawReader> legacy;
     if (straw_v10::isV10(path)) v10.reset(new straw_v10::File(path));
+    else legacy.reset(new StrawRawReader(path));
     auto chromosomes = v10 ? v10->chromosomes() : getChromosomesForFile(path);
     auto resolutions = v10 ? v10->resolutions() : getResolutionsForFile(path);
     if (resolutions.empty() || *std::min_element(resolutions.begin(), resolutions.end()) <= 0)
@@ -166,7 +169,9 @@ static int exportCounts(const std::string& path, double probability, bool contac
                             emit(r.binX, r.binY, r.isScore ? integerCount(r.score) : r.count);
                         });
                 } else {
-                    forEachRawObservedBlock(path, a.name, b.name, bp,
+                    // One reader for the whole sweep: forEachRawObservedBlock
+                    // re-parsed the header and footer for each of the ~N^2/2 pairs.
+                    legacy->forEachBlock(a.name, b.name, bp,
                         [&](const std::vector<contactRecord>& records) {
                             for (const auto& r : records) {
                                 if (r.binX < 0 || r.binY < 0) throw std::runtime_error("Negative bin coordinate");

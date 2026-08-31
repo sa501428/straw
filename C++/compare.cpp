@@ -15,7 +15,9 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <memory>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -127,6 +129,18 @@ struct Band {
     bool active = false;
     uint64_t lo = 0, hi = 0;
 };
+
+// The diagonal-offset options apply to every intra-chromosomal sample, not just
+// the stratified sweep. Without this they were parsed, validated and printed but
+// never reached sampleRegion.
+Band optionBand(const Options &o) {
+    Band b;
+    if (!o.varyDistance) return b;
+    b.active = true;
+    b.lo = o.minDistance;
+    b.hi = o.maxDistance;  // 0 means "up to the chromosome length"
+    return b;
+}
 
 Band stratumBand(int s, const Options &o) {
     Band b;
@@ -259,8 +273,8 @@ void statHeader(const std::string &title) {
 }
 
 void report(const Bench &bench, const Options &o) {
-    std::cout << "\nTiming (wall clock per query; each query re-opens the file and parses its "
-                 "header)\n";
+    std::cout << "\nTiming (wall clock per region read; each file is opened and its header "
+                 "parsed once, outside the timed section)\n";
     std::cout << "  first  = " << o.first << "\n  second = " << o.second << '\n';
     statHeader("Totals by operation");
     const char *names[2] = {"first", "second"};
@@ -442,7 +456,38 @@ struct Read {
     uint64_t records = 0;
 };
 
-Read rawCells(const std::string &path, const Region &r) {
+// Holds the opened reader for one file so that a timed region read does not also
+// pay to open the file and parse its header. Timing them together made the
+// figures mostly header-parse cost for small windows, and penalised V10, whose
+// header validation is far more thorough than the legacy reader's.
+struct Reader {
+    std::string path;
+    bool v10 = false;
+    std::unique_ptr<straw_v10::File> file;
+    // Legacy queries are prepared per (chromosome pair, resolution); a prepared
+    // query keeps the parsed footer and matrix index across windows.
+    std::map<std::tuple<std::string, std::string, int32_t>,
+             std::unique_ptr<StrawPreparedQuery>> prepared;
+
+    void open(const std::string &p) {
+        path = p;
+        v10 = straw_v10::isV10(p);
+        if (v10) file.reset(new straw_v10::File(p));
+    }
+
+    StrawPreparedQuery &query(const std::string &chr1, const std::string &chr2, int32_t resolution) {
+        auto key = std::make_tuple(chr1, chr2, resolution);
+        auto found = prepared.find(key);
+        if (found == prepared.end()) {
+            std::unique_ptr<StrawPreparedQuery> q(new StrawPreparedQuery(
+                path, "observed", "NONE", chr1, chr2, "BP", resolution));
+            found = prepared.emplace(std::move(key), std::move(q)).first;
+        }
+        return *found->second;
+    }
+};
+
+Read rawCells(Reader &reader, const Region &r) {
     Read out;
     const int32_t resolution = r.resolution;
     auto add = [&](uint64_t x, uint64_t y, double value) {
@@ -456,20 +501,27 @@ Read rawCells(const std::string &path, const Region &r) {
         out.cells[{x / static_cast<uint64_t>(resolution), y / static_cast<uint64_t>(resolution)}] +=
             value;
     };
-    const std::string a = location(r.chr1, r.x0, r.x1), b = location(r.chr2, r.y0, r.y1);
-    auto start = Clock::now();
-    if (straw_v10::isV10(path)) {
-        straw_v10::File(path).streamRaw(a, b, "BP", resolution,
+    if (reader.v10) {
+        const std::string a = location(r.chr1, r.x0, r.x1), b = location(r.chr2, r.y0, r.y1);
+        auto start = Clock::now();
+        reader.file->streamRaw(a, b, "BP", resolution,
             [&](const straw_v10::Record &record) {
                 double value = record.isScore ? static_cast<double>(record.score)
                                               : static_cast<double>(record.count);
                 add(uint64_t(record.binX) * resolution, uint64_t(record.binY) * resolution, value);
             });
+        out.seconds = since(start);
     } else {
-        strawStream("observed", "NONE", path, a, b, "BP", resolution,
-            [&](const contactRecord &record) { add(record.binX, record.binY, record.counts); });
+        StrawPreparedQuery &q = reader.query(r.chr1, r.chr2, resolution);
+        auto start = Clock::now();
+        q.streamWindow(static_cast<int64_t>(r.x0), static_cast<int64_t>(r.x1),
+                       static_cast<int64_t>(r.y0), static_cast<int64_t>(r.y1),
+                       [&](const contactRecord &record) {
+                           add(static_cast<uint64_t>(record.binX),
+                               static_cast<uint64_t>(record.binY), record.counts);
+                       });
+        out.seconds = since(start);
     }
-    out.seconds = since(start);
     return out;
 }
 
@@ -527,7 +579,8 @@ void compareVector(const std::string &kind, const std::string &chr, int32_t reso
         indices.resize(n);
         for (size_t i = 0; i < n; ++i) indices[i] = i;
     } else if (n) {
-        std::mt19937_64 rng(o.seed ^ uint64_t(resolution) ^ std::hash<std::string>{}(chr + kind + norm));
+        std::mt19937_64 rng(o.seed ^ uint64_t(resolution) ^
+                            std::hash<std::string>{}(chr + '\0' + kind + '\0' + norm));
         indices = {0, n - 1, n / 2};
         for (size_t k = 0; k < o.samples * o.windowHigh(); ++k) indices.push_back(rng() % n);
         std::sort(indices.begin(), indices.end());
@@ -694,7 +747,9 @@ int compareMain(int argc, char *argv[]) {
             std::sort(resolutions.begin(), resolutions.end());
         }
         int32_t coarsest = *std::max_element(resolutions.begin(), resolutions.end());
-        const auto &v10Chroms = firstV10 ? ca : cb;
+        // Canonical bin counts: when one file is V10, its ceil(length/bin)
+        // convention is the reference the other is compared against.
+        const auto &canonicalChroms = firstV10 ? ca : cb;
 
         auto chromLength = [&](const std::string &name) {
             return std::min<uint64_t>(ca[name].length, cb[name].length);
@@ -702,6 +757,10 @@ int compareMain(int argc, char *argv[]) {
 
         // Reads both files for one region (repeated if requested), records the
         // timings, and compares the first pair of reads.
+        Reader readers[2];
+        readers[0].open(o.first);
+        readers[1].open(o.second);
+
         auto check = [&](const Region &r) {
             ++s.windows;
             std::string context = r.chr1 + "/" + r.chr2 + " @" + std::to_string(r.resolution) +
@@ -709,12 +768,12 @@ int compareMain(int argc, char *argv[]) {
                 std::to_string(r.y0) + "," + std::to_string(r.y1) + ")";
             Cells first, second;
             for (size_t iteration = 0; iteration < o.repeat; ++iteration) {
-                // Whichever file is read second benefits from a warm page
-                // cache, so alternate the order: a systematic bias would
+                // Whichever file is read second benefits from a warm OS cache,
+                // so alternate the order: a systematic bias would
                 // otherwise show up as a spurious speed difference.
                 bool secondLeads = (s.windows + iteration) % 2 == 0;
-                Read lead = rawCells(secondLeads ? o.second : o.first, r);
-                Read trail = rawCells(secondLeads ? o.first : o.second, r);
+                Read lead = rawCells(readers[secondLeads ? 1 : 0], r);
+                Read trail = rawCells(readers[secondLeads ? 0 : 1], r);
                 Read &a = secondLeads ? trail : lead;
                 Read &b = secondLeads ? lead : trail;
                 bench.region(0, r, a.seconds, a.records, iteration);
@@ -800,7 +859,8 @@ int compareMain(int argc, char *argv[]) {
                 }
                 const std::string &x = commonChroms[i], &y = commonChroms[j];
                 ++s.matrices;
-                check(sampleRegion(rng, o, x, y, resolution, chromLength(x), chromLength(y)));
+                check(sampleRegion(rng, o, x, y, resolution, chromLength(x), chromLength(y),
+                                   optionBand(o)));
             }
         }
 
@@ -825,10 +885,14 @@ int compareMain(int argc, char *argv[]) {
                             r.distance = x == y ? 0 : -1;
                             check(r);
                         } else {
+                            // '\0' as a char: "\0" is a zero-length C string, so the
+                            // separator vanished and ("chr1","chr23") hashed the
+                            // same as ("chr12","chr3").
                             std::mt19937_64 rng(o.seed ^ uint64_t(resolution) ^
-                                std::hash<std::string>{}(x + "\0" + y));
+                                std::hash<std::string>{}(x + '\0' + y));
                             for (size_t k = 0; k < o.samples; ++k)
-                                check(sampleRegion(rng, o, x, y, resolution, xlen, ylen));
+                                check(sampleRegion(rng, o, x, y, resolution, xlen, ylen,
+                                                   optionBand(o)));
                         }
                     }
                 }
@@ -837,15 +901,15 @@ int compareMain(int argc, char *argv[]) {
             for (const auto &chr : commonChroms) {
                 std::vector<double> a, b;
                 size_t expectedLength = 0;
-                for (const auto &entry : v10Chroms)
+                for (const auto &entry : canonicalChroms)
                     if (entry.first != "ALL" && entry.first != "All" && entry.first != "all")
                         expectedLength = std::max<size_t>(
                             expectedLength,
                             entry.second.length / uint64_t(resolution) +
                                 (entry.second.length % uint64_t(resolution) != 0));
                 size_t normalizationLength =
-                    v10Chroms.at(chr).length / uint64_t(resolution) +
-                    (v10Chroms.at(chr).length % uint64_t(resolution) != 0);
+                    canonicalChroms.at(chr).length / uint64_t(resolution) +
+                    (canonicalChroms.at(chr).length % uint64_t(resolution) != 0);
                 auto fetch = [&](int which, const std::string &kind, const std::string &norm,
                                  std::vector<double> &out) {
                     const std::string &path = which ? o.second : o.first;

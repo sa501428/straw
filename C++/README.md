@@ -280,7 +280,7 @@ For bug reports or feature requests, please open an issue on the repository.
 ## V10 files
 
 V10 support follows the consolidated `hic-format/HiCFormatV10.md` specification
-(88-byte header and page/vector indexes), not the older experimental V9-like
+(88-byte header, exact block indexes, and vector indexes), not the older experimental V9-like
 block extension. V6–V9 continue to use their existing read path. The new format
 implementation is isolated in `straw_v10.cpp`, `straw_v10.h`, and `v10_binary.h`;
 CMake links it automatically. Custom builds must compile `straw_v10.cpp` alongside
@@ -345,7 +345,7 @@ when aggregating a derived resolution.
 ### Remote reads and tests
 
 HTTP(S) reading uses byte ranges and requires a server returning exact `206`
-responses with `Content-Range`. Only candidate pages and vector chunks intersecting
+responses with `Content-Range`. Only candidate blocks and vector chunks intersecting
 the query are fetched; a server ignoring Range is rejected instead of downloading
 the whole file. Local format tests use independently generated binary fixtures:
 

@@ -82,17 +82,14 @@ def fixture(path, rep=0, mode=2, score=False, values=(1, 1, 5), malformed=None,
     matrix_pos = len(data)
     data += b'H10M' + pack('5I', 1, 0, 0, ndesc, 0) + bytes(76 * ndesc)
     logical = block(rep, mode, score, values, malformed, collision)
-    directory = var(0) + var(len(logical))
-    payload = pack('I', len(directory)) + directory + logical
-    frame = compress(payload)
+    frame = compress(logical)
     if malformed == 'concat-frame': frame += compress(b'extra')
-    page = b'H10P' + pack('BBHII', 1, 1, 0, len(payload), 1) + frame
-    page_pos = len(data)
-    data += page
-    blob = var(0) + var(len(page)) + var(len(payload))
+    stored = b'H10B' + pack('BBHII', 1, 1, 0, len(logical), 0) + frame
+    block_pos = len(data)
+    data += stored
     index_pos = len(data)
-    idx = b'H10I' + pack('5IQ', 1, 1, 64, 1, 0, len(blob))
-    idx += pack('4I2Q', 0, 1, 0, 0, page_pos, 0) + blob
+    idx = b'H10I' + pack('IQII', 2, 40, 1, 0)
+    idx += pack('IIQ', 0, len(stored), block_pos)
     data += idx
     if score:
         floats = [struct.unpack('<f', pack('I', v))[0] for v in values]
@@ -105,7 +102,7 @@ def fixture(path, rep=0, mode=2, score=False, values=(1, 1, 5), malformed=None,
                     sum_bits, 1 if is_derived and collision else 3,
                     0x7fc00000, 0x7fc00000, 4, 1 if is_derived else 2,
                     0 if is_derived else index_pos, 0 if is_derived else len(idx),
-                    0 if is_derived else 1, 0 if is_derived else 1)
+                    0 if is_derived else 1, 0)
     desc = descriptor(0, 0, 10, False)
     if derived: desc += descriptor(0, 1, 20, True)
     if frag: desc += descriptor(1, 0, 1, False)
@@ -143,6 +140,7 @@ def fixture(path, rep=0, mode=2, score=False, values=(1, 1, 5), malformed=None,
     if malformed == 'bad-footer': struct.pack_into('<Q', data, 16, len(data)+10)
     if malformed == 'unknown-mode': data[matrix_pos+25] = 7
     if malformed == 'invalid-source': struct.pack_into('<I', data, matrix_pos+24+76+12, 1)
+    if malformed == 'old-index': struct.pack_into('<I', data, index_pos+4, 1)
     if malformed == 'short': data = data[:-1]
     path.write_bytes(data)
     return data
@@ -193,10 +191,8 @@ def main():
         data = bytearray(fixture(path))
         footer = struct.unpack_from('<Q', data, 16)[0]
         matrix = struct.unpack_from('<Q', data, footer+32)[0]
-        index = len(data)
-        data += b'H10I' + pack('5IQ', 1, 0, 64, 0, 0, 0)
         struct.pack_into('<QQ', data, matrix+24+20, 0, 0)
-        struct.pack_into('<QQII', data, matrix+24+52, index, 32, 0, 0)
+        struct.pack_into('<QQII', data, matrix+24+52, 0, 0, 0, 0)
         path.write_bytes(data)
         assert run([probe, path, 'raw', 'chrA', 'chrA', 10]) == ''
         fixture(path, collision=True)
@@ -214,7 +210,7 @@ def main():
         assert f'0\t0\t{(1 << 53)+1}' in run([straw, 'observed', 'NONE', path, 'chrA', 'chrA', 'BP', 10])
         for bad in ['overlong', 'duplicate', 'zero-count', 'overflow-varint', 'concat-frame',
                     'bad-footer', 'unknown-mode', 'invalid-source', 'mandatory-materialized',
-                    'nonrotated-cis', 'short']:
+                    'nonrotated-cis', 'old-index', 'short']:
             fixture(path, malformed=bad)
             run([straw, 'observed', 'NONE', path, 'chrA', 'chrA', 'BP', 10], ok=False)
         fixture(path, rep=2, score=True, values=(1, 2, 3), malformed='absent-score')

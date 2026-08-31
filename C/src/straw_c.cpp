@@ -265,17 +265,21 @@ straw_status_t straw_file_open(const char *path_or_url, straw_file_t **out_file,
                     throw StrawException(StrawErrorCode::Io,
                                          "file cannot be opened for reading");
             }
-            file->version = getVersionForFile(file->path);
+            // One open for the whole metadata set: the individual accessors each
+            // cost an isV10 probe plus a reader construction, which added up to
+            // roughly fourteen opens (and as many HTTP round trips) per call.
+            const StrawFileInfo info = getFileInfo(file->path);
+            file->version = info.version;
             if (file->version < 6 || file->version > 10) {
                 throw StrawException(StrawErrorCode::UnsupportedVersion,
                                      "unsupported .hic version");
             }
-            file->genome = getGenomeForFile(file->path);
-            file->chromosomes = getChromosomesForFile(file->path);
-            file->bp_resolutions = getResolutionsForFile(file->path, "BP");
-            file->frag_resolutions = getResolutionsForFile(file->path, "FRAG");
-            file->normalizations = getNormalizationsForFile(file->path);
-            file->attributes = getAttributesForFile(file->path);
+            file->genome = info.genome;
+            file->chromosomes = info.chromosomes;
+            file->bp_resolutions = info.bpResolutions;
+            file->frag_resolutions = info.fragResolutions;
+            file->normalizations = info.normalizations;
+            file->attributes = info.attributes;
             if (file->chromosomes.empty()) {
                 throw StrawException(StrawErrorCode::CorruptFile,
                                      "invalid or empty .hic chromosome table");
@@ -568,12 +572,15 @@ straw_status_t straw_query_regions(const straw_query_t *query, const straw_regio
                 if (region.x_start < 0 || region.y_start < 0 || region.x_end < region.x_start ||
                     region.y_end < region.y_start)
                     throw std::invalid_argument("invalid region in batch query");
-                straw_records *records = read_records(*query->native,
-                    region.x_start, region.x_end, region.y_start, region.y_end);
-                batch->x.insert(batch->x.end(), records->x.begin(), records->x.end());
-                batch->y.insert(batch->y.end(), records->y.begin(), records->y.end());
-                batch->values.insert(batch->values.end(), records->values.begin(), records->values.end());
-                delete records;
+                // Stream straight into the batch: this used to build a whole
+                // straw_records per region and then copy it in.
+                query->native->streamWindow(region.x_start, region.x_end,
+                                            region.y_start, region.y_end,
+                                            [&](const contactRecord &record) {
+                                                batch->x.push_back(record.binX);
+                                                batch->y.push_back(record.binY);
+                                                batch->values.push_back(record.counts);
+                                            });
                 batch->offsets.push_back(batch->x.size());
             }
         } catch (...) {

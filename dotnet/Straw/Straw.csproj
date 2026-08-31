@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <PackageId>HicStraw.Native</PackageId>
+    <Version>1.0.0</Version>
+    <Description>Thin .NET bindings for the native libstraw .hic reader.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryUrl>https://github.com/aidenlab/straw</RepositoryUrl>
+    <PackageTags>hic;genomics;straw</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="../README.md" Pack="true" PackagePath="/" Link="README.md" />
+    <None Include="runtimes/**/native/*" Pack="true" PackagePath="runtimes/%(RecursiveDir)" />
+  </ItemGroup>
+</Project>

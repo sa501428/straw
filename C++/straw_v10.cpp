@@ -10,6 +10,7 @@
 #include <set>
 #include <sstream>
 #include <tuple>
+#include <unordered_set>
 #include <zstd.h>
 
 namespace straw_v10 {
@@ -269,13 +270,13 @@ uint8_t unitId(const std::string &unit) {
 }
 struct Zoom {
     uint8_t unit, mode, aggregation, type, grid;
-    uint32_t ri, bin, source, B, columns, pages, blocks;
+    uint32_t ri, bin, source, B, columns, blocks;
     uint64_t sum, occupied;
     Locator index;
 };
-struct Page {
-    uint32_t first, last, raw;
-    uint64_t pos, len;
+struct BlockEntry {
+    uint32_t number, len;
+    uint64_t pos;
 };
 using Pair = std::pair<uint32_t, uint32_t>;
 uint32_t blockNumber(uint32_t x, uint32_t y, const Zoom &z) {
@@ -300,6 +301,9 @@ struct File::Impl {
     Header h;
     std::map<Pair, Locator> matrices;
     std::map<Pair, std::vector<Zoom>> zoomCache;
+    // Block indexes are re-read and re-validated on every query otherwise, which
+    // a windowed reader (StrawPreparedQuery) pays once per window.
+    std::map<uint64_t, std::vector<BlockEntry>> blockIndexCache;
     explicit Impl(const std::string &path) : source(path) {
         auto prefix = source.read(0, 88);
         Cursor c(prefix);
@@ -378,8 +382,8 @@ struct File::Impl {
             z.B = c.word();
             z.columns = c.word();
             z.index = locator(c);
-            z.pages = c.word();
             z.blocks = c.word();
+            c.zero(4);
             uint8_t unit = i < h.resolutions[0].size() ? 0 : 1;
             uint32_t ri = i - (unit ? h.resolutions[0].size() : 0);
             const auto &r = h.resolutions[unit][ri];
@@ -391,11 +395,11 @@ struct File::Impl {
             require(z.columns == (h.bins(key.first, unit, ri) + z.B - 1) / z.B,
                     "invalid block column count");
             if (z.mode)
-                require(!z.index.pos && !z.pages && !z.blocks, "derived resolution has storage");
+                require(!z.index.pos && !z.blocks, "derived resolution has storage");
             else if (z.occupied)
-                require(z.index.pos && z.pages && z.blocks, "missing matrix pages");
+                require(z.index.pos && z.blocks, "missing matrix blocks");
             else
-                require(!z.pages && !z.blocks, "empty matrix has pages");
+                require(!z.index.pos && !z.blocks, "empty matrix has block storage");
             if (z.index.len)
                 source.interval(z.index.pos, z.index.len);
             result.push_back(z);
@@ -412,68 +416,41 @@ struct File::Impl {
             return nullptr;
         return &all.at((unit ? h.resolutions[0].size() : 0) + ri);
     }
-    std::vector<Page> pages(const Zoom &z) {
+    const std::vector<BlockEntry> &blockIndex(const Zoom &z) {
+        static const std::vector<BlockEntry> empty;
         if (!z.index.len)
-            return {};
+            return empty;
+        auto cached = blockIndexCache.find(z.index.pos);
+        if (cached != blockIndexCache.end())
+            return cached->second;
         auto data = source.read(z.index.pos, z.index.len);
         Cursor c(data);
         c.magic("H10I");
-        require(c.word() == 1 && c.word() == z.pages, "page index version/count mismatch");
-        uint32_t interval = c.word(), groups = c.word();
+        require(c.word() == 2 && c.wide() == z.index.len,
+                "block index version/length mismatch");
+        uint32_t count = c.word();
         c.zero(4);
-        uint64_t blobLen = c.wide();
-        require(interval && groups == (uint64_t(z.pages) + interval - 1) / interval &&
-                    uint64_t(groups) * 32 <= c.left(),
-                "invalid checkpoints");
-        struct Check {
-            uint32_t first, n, block;
-            uint64_t pos, offset;
-        };
-        std::vector<Check> checks;
-        for (uint32_t i = 0; i < groups; ++i) {
-            Check q;
-            q.first = c.word();
-            q.n = c.word();
-            q.block = c.word();
-            c.zero(4);
-            q.pos = c.wide();
-            q.offset = c.wide();
-            checks.push_back(q);
+        require(count == z.blocks && z.index.len == 24 + uint64_t(count) * 16,
+                "invalid block index count/length");
+        std::vector<BlockEntry> out;
+        out.reserve(count);
+        for (uint32_t i = 0; i < count; ++i) {
+            BlockEntry entry{c.word(), c.word(), c.wide()};
+            require(!i || entry.number > out.back().number, "unordered block index");
+            require(entry.len > 16, "invalid stored block length");
+            source.interval(entry.pos, entry.len);
+            out.push_back(entry);
         }
-        require(blobLen == c.left(), "page descriptor length mismatch");
-        Cursor blob = c.take(blobLen);
-        std::vector<Page> out;
-        for (size_t i = 0; i < checks.size(); ++i) {
-            const auto &q = checks[i];
-            require(q.first == out.size() && q.n && q.n <= interval && q.offset == blob.at,
-                    "invalid checkpoint coverage");
-            require(i || q.offset == 0, "first descriptor offset must be zero");
-            uint64_t pos = q.pos;
-            uint32_t first = q.block;
-            if (!out.empty())
-                require(pos == add(out.back().pos, out.back().len) && first > out.back().last,
-                        "pages are not contiguous/ordered");
-            for (uint32_t j = 0; j < q.n; ++j) {
-                if (j)
-                    first = u32(add(add(out.back().last, 1), blob.var()));
-                uint32_t last = u32(add(first, blob.var()));
-                uint64_t len = blob.var();
-                uint32_t raw = u32(blob.var());
-                require(len > 16 && raw >= 4 && raw <= allocationLimit, "invalid page length");
-                source.interval(pos, len);
-                out.push_back({first, last, raw, pos, len});
-                pos = add(pos, len);
-            }
-        }
-        blob.done();
-        require(out.size() == z.pages, "page count mismatch");
-        return out;
+        c.done();
+        return blockIndexCache.emplace(z.index.pos, std::move(out)).first->second;
     }
-    bool candidate(const Page &p, const Zoom &z, uint64_t x0, uint64_t x1, uint64_t y0, uint64_t y1,
-                   bool cis) {
+    bool candidate(uint32_t number, const Zoom &z, uint64_t x0, uint64_t x1, uint64_t y0,
+                   uint64_t y1, bool cis) {
         if (x0 >= x1 || y0 >= y1)
             return false;
-        auto intersects = [&](uint64_t lo, uint64_t hi) { return lo <= p.last && hi >= p.first; };
+        auto intersects = [&](uint64_t lo, uint64_t hi) {
+            return lo <= number && number <= hi;
+        };
         if (z.grid) {
             uint64_t lo = (x0 + y0) / (2ULL * z.B), hi = (x1 + y1 - 2) / (2ULL * z.B);
             uint64_t d = std::max(x1 > y0 ? x1 - y0 : 0, y1 > x0 ? y1 - x0 : 0), depth = 0;
@@ -486,7 +463,7 @@ struct File::Impl {
         }
         auto rect = [&](uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
             uint64_t loCol = a / z.B, hiCol = (b - 1) / z.B, loRow = c / z.B, hiRow = (d - 1) / z.B;
-            uint64_t firstRow = p.first / z.columns, lastRow = p.last / z.columns;
+            uint64_t firstRow = number / z.columns, lastRow = number / z.columns;
             uint64_t row = std::max(loRow, firstRow), end = std::min(hiRow, lastRow);
             if (row > end)
                 return false;
@@ -605,46 +582,26 @@ struct File::Impl {
                       const Callback &cb) {
         uint64_t totalBlocks = 0, totalCells = 0, sum = 0;
         bool all = true;
-        for (const auto &p : pages(z)) {
-            if (!candidate(p, z, x0, x1, y0, y1, key.first == key.second)) {
+        for (const auto &entry : blockIndex(z)) {
+            if (!candidate(entry.number, z, x0, x1, y0, y1, key.first == key.second)) {
                 all = false;
                 continue;
             }
-            auto bytes = source.read(p.pos, p.len);
+            auto bytes = source.read(entry.pos, entry.len);
             Cursor c(bytes);
-            c.magic("H10P");
-            require(c.byte() == 1 && c.byte() == 1, "unknown page codec/version");
+            c.magic("H10B");
+            require(c.byte() == 1 && c.byte() == 1, "unknown block codec/record version");
             c.zero(2);
-            require(c.word() == p.raw, "page size mismatch");
-            uint32_t n = c.word();
-            require(n > 0 && n <= p.raw / 42, "invalid page block count");
-            auto payload = decompress(c, p.raw);
-            Cursor body(payload);
-            uint32_t dirSize = body.word();
-            Cursor dir = body.take(dirSize);
-            std::vector<std::pair<uint32_t, uint64_t>> blocks;
-            uint32_t previous = 0;
-            for (uint32_t i = 0; i < n; ++i) {
-                auto d = dir.var();
-                require(!i || d, "duplicate block number");
-                uint32_t b = u32(i ? add(previous, d) : d);
-                auto len = dir.var();
-                require(len >= 40, "invalid block length");
-                blocks.emplace_back(b, len);
-                previous = b;
-            }
-            dir.done();
-            require(blocks.front().first == p.first && blocks.back().first == p.last,
-                    "page range mismatch");
-            for (const auto &b : blocks)
-                block(body.take(b.second), b.first, z, key, [&](const Record &r) {
-                    ++totalCells;
-                    if (!z.type)
-                        sum = add(sum, r.count);
-                    cb(r);
-                });
-            body.done();
-            totalBlocks += n;
+            uint32_t raw = c.word();
+            require(c.word() == entry.number && raw >= 40, "block record/index mismatch");
+            auto payload = decompress(c, raw);
+            block(Cursor(payload), entry.number, z, key, [&](const Record &r) {
+                ++totalCells;
+                if (!z.type)
+                    sum = add(sum, r.count);
+                cb(r);
+            });
+            ++totalBlocks;
         }
         if (all)
             require(totalBlocks == z.blocks && totalCells == z.occupied && (z.type || sum == z.sum),
@@ -668,28 +625,44 @@ struct File::Impl {
         }
         const Zoom &s = *zoom(key, unit, z->source);
         uint64_t factor = z->bin / s.bin;
-        std::map<std::pair<uint32_t, uint32_t>, Record> sourceCells;
-        materialized(key, s, x0 * factor, std::min(x1 * factor, h.bins(key.first, unit, s.ri)),
-                     y0 * factor, std::min(y1 * factor, h.bins(key.second, unit, s.ri)),
-                     [&](const Record &r) {
-                         uint32_t x = r.binX / factor, y = r.binY / factor;
-                         if (inside(x, y))
-                             require(sourceCells.emplace(std::make_pair(r.binY, r.binX), r).second,
-                                     "duplicate source cell");
-                     });
         struct Acc {
             uint64_t count = 0;
             double score = 0;
         };
         std::map<std::pair<uint32_t, uint32_t>, Acc> sums;
-        for (const auto &entry : sourceCells) {
-            const auto &r = entry.second;
-            auto &a = sums[{r.binY / factor, r.binX / factor}];
-            if (!z->type)
-                a.count = add(a.count, r.count);
-            else {
-                require(std::isfinite(r.score), "nonfinite derived source score");
-                a.score += double(r.score);
+        // The source cells used to be buffered whole in a second std::map purely
+        // so duplicates could be detected. A hash set of the packed coordinate
+        // does the same job without holding a Record per source cell.
+        std::unordered_set<uint64_t> seen;
+        // Integer counts are order-independent, so they accumulate as cells
+        // arrive. Float scores are not, so they keep the previous behaviour of
+        // being summed in ascending (binY, binX) source order.
+        std::vector<std::pair<std::pair<uint32_t, uint32_t>, float>> scores;
+        materialized(key, s, x0 * factor, std::min(x1 * factor, h.bins(key.first, unit, s.ri)),
+                     y0 * factor, std::min(y1 * factor, h.bins(key.second, unit, s.ri)),
+                     [&](const Record &r) {
+                         uint32_t x = r.binX / factor, y = r.binY / factor;
+                         if (!inside(x, y))
+                             return;
+                         require(seen.insert((uint64_t(r.binY) << 32) | r.binX).second,
+                                 "duplicate source cell");
+                         if (!z->type) {
+                             auto &a = sums[{y, x}];
+                             a.count = add(a.count, r.count);
+                         } else {
+                             scores.emplace_back(std::make_pair(r.binY, r.binX), r.score);
+                         }
+                     });
+        if (z->type) {
+            std::sort(scores.begin(), scores.end(),
+                      [](const std::pair<std::pair<uint32_t, uint32_t>, float> &a,
+                         const std::pair<std::pair<uint32_t, uint32_t>, float> &b) {
+                          return a.first < b.first;
+                      });
+            for (const auto &entry : scores) {
+                auto &a = sums[{entry.first.first / factor, entry.first.second / factor}];
+                require(std::isfinite(entry.second), "nonfinite derived source score");
+                a.score += double(entry.second);
                 require(std::isfinite(a.score), "derived score overflow");
             }
         }

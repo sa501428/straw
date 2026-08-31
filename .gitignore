@@ -7,7 +7,11 @@
 *.o
 *.so
 *.dylib
-straw
+# Anchored: an unanchored "straw" also matches the C API's public header
+# directory C/include/straw/, which excluded straw.h from the repository and
+# left a clean checkout unable to build the C API.
+/straw
+/C++/straw
 
 # Packages #
 ############
