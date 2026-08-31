@@ -9,9 +9,16 @@
 
 namespace straw_v10 {
 using Bytes = std::vector<uint8_t>;
+// Keep literal validation messages on a zero-allocation success path.  The
+// std::string-only overload used to construct a temporary string for every
+// successful byte and ULEB128 bounds check in the hot block decoder.
+inline void require(bool ok, const char *message) {
+    if (!ok)
+        throw std::runtime_error(std::string("V10: ") + message);
+}
 inline void require(bool ok, const std::string &message) {
     if (!ok)
-        throw std::runtime_error("V10: " + message);
+        throw std::runtime_error(std::string("V10: ") + message);
 }
 inline uint64_t add(uint64_t a, uint64_t b) {
     require(b <= UINT64_MAX - a, "integer overflow");
@@ -44,21 +51,25 @@ struct Cursor {
     void need(uint64_t n) const {
         require(n <= left(), "truncated record");
     }
-    uint64_t integer(unsigned n) {
-        need(n);
-        uint64_t v = 0;
-        for (unsigned i = 0; i < n; ++i)
-            v |= uint64_t(p[at++]) << (8 * i);
-        return v;
-    }
     uint8_t byte() {
-        return static_cast<uint8_t>(integer(1));
+        need(1);
+        return p[at++];
     }
     uint32_t word() {
-        return static_cast<uint32_t>(integer(4));
+        need(4);
+        uint32_t v = uint32_t(p[at]) | (uint32_t(p[at + 1]) << 8) |
+                     (uint32_t(p[at + 2]) << 16) | (uint32_t(p[at + 3]) << 24);
+        at += 4;
+        return v;
     }
     uint64_t wide() {
-        return integer(8);
+        need(8);
+        uint64_t v = uint64_t(p[at]) | (uint64_t(p[at + 1]) << 8) |
+                     (uint64_t(p[at + 2]) << 16) | (uint64_t(p[at + 3]) << 24) |
+                     (uint64_t(p[at + 4]) << 32) | (uint64_t(p[at + 5]) << 40) |
+                     (uint64_t(p[at + 6]) << 48) | (uint64_t(p[at + 7]) << 56);
+        at += 8;
+        return v;
     }
     uint64_t var() {
         uint64_t v = 0;

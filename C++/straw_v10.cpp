@@ -249,7 +249,7 @@ Header parseHeader(const Bytes &bytes) {
                 require(h.bins(chr, unit, ri) <= UINT32_MAX, "chromosome bin count exceeds uint32");
     return h;
 }
-Bytes decompress(Cursor &c, uint32_t bytes) {
+Bytes decompress(ZSTD_DCtx *decoder, Cursor &c, uint32_t bytes) {
     require(bytes > 0 && bytes <= allocationLimit, "decompressed record exceeds allocation limit");
     c.need(4);
     require(c.p[c.at] == 0x28 && c.p[c.at + 1] == 0xb5 && c.p[c.at + 2] == 0x2f &&
@@ -260,7 +260,7 @@ Bytes decompress(Cursor &c, uint32_t bytes) {
     size_t frame = ZSTD_findFrameCompressedSize(c.p + c.at, c.left());
     require(!ZSTD_isError(frame) && frame == c.left(), "invalid or concatenated Zstandard frame");
     Bytes result(bytes);
-    size_t n = ZSTD_decompress(result.data(), result.size(), c.p + c.at, c.left());
+    size_t n = ZSTD_decompressDCtx(decoder, result.data(), result.size(), c.p + c.at, c.left());
     require(!ZSTD_isError(n) && n == bytes, "Zstandard decompression/length/checksum failure");
     return result;
 }
@@ -279,32 +279,87 @@ struct BlockEntry {
     uint64_t pos;
 };
 using Pair = std::pair<uint32_t, uint32_t>;
-uint32_t blockNumber(uint32_t x, uint32_t y, const Zoom &z) {
-    if (!z.grid)
-        return u32(uint64_t(y / z.B) * z.columns + x / z.B);
-    uint64_t d = uint64_t(y) - x, depth = 0;
-    // For u32 coordinates the RHS can be capped once it exceeds d^2.
+uint32_t distanceDepth(uint64_t d, uint32_t blockBinCount) {
+    uint32_t depth = 0;
     using Wide = unsigned __int128;
-    Wide lhs = Wide(d) * d, b = Wide(2) * z.B * z.B;
+    Wide lhs = Wide(d) * d, scale = Wide(2) * blockBinCount * blockBinCount;
     while (depth < 32) {
-        Wide t = (Wide(1) << (depth + 1)) - 1;
-        if (t * t > lhs / b)
+        Wide threshold = (Wide(1) << (depth + 1)) - 1;
+        if (threshold * threshold > lhs / scale)
             break;
         ++depth;
     }
-    return u32(depth * z.columns + (uint64_t(x) + y) / (uint64_t(2) * z.B));
+    return depth;
+}
+
+uint32_t blockNumber(uint32_t x, uint32_t y, const Zoom &z) {
+    if (!z.grid)
+        return u32(uint64_t(y / z.B) * z.columns + x / z.B);
+    uint32_t depth = distanceDepth(uint64_t(y) - x, z.B);
+    return u32(uint64_t(depth) * z.columns +
+               (uint64_t(x) + y) / (uint64_t(2) * z.B));
+}
+
+using BlockRange = std::pair<uint32_t, uint32_t>;
+
+std::vector<BlockRange> candidateBlockRanges(const Zoom &z, uint64_t x0, uint64_t x1,
+                                             uint64_t y0, uint64_t y1) {
+    std::vector<BlockRange> ranges;
+    if (x0 >= x1 || y0 >= y1)
+        return ranges;
+
+    auto append = [&](uint64_t lo, uint64_t hi) {
+        if (lo > UINT32_MAX)
+            return;
+        ranges.emplace_back(static_cast<uint32_t>(lo),
+                            static_cast<uint32_t>(std::min<uint64_t>(hi, UINT32_MAX)));
+    };
+
+    if (!z.grid) {
+        uint64_t firstColumn = x0 / z.B, lastColumn = (x1 - 1) / z.B;
+        uint64_t firstRow = y0 / z.B, lastRow = (y1 - 1) / z.B;
+        ranges.reserve(static_cast<size_t>(lastRow - firstRow + 1));
+        for (uint64_t row = firstRow; row <= lastRow; ++row)
+            append(row * z.columns + firstColumn, row * z.columns + lastColumn);
+        return ranges;
+    }
+
+    // Cis blocks use V9's rotated (diagonal, distance) grid.  The old V10
+    // reader searched every distance band from zero to the farthest corner,
+    // causing far-cis queries to decompress dense near-diagonal blocks.  Map
+    // the half-open query rectangle to its exact enclosing range on both
+    // rotated axes instead.
+    uint64_t lastX = x1 - 1, lastY = y1 - 1;
+    uint64_t nearest = 0;
+    if (x1 <= y0)
+        nearest = y0 - lastX;
+    else if (y1 <= x0)
+        nearest = x0 - lastY;
+    uint64_t farthest = std::max(lastY >= x0 ? lastY - x0 : x0 - lastY,
+                                 lastX >= y0 ? lastX - y0 : y0 - lastX);
+    uint32_t firstDepth = distanceDepth(nearest, z.B);
+    uint32_t lastDepth = distanceDepth(farthest, z.B);
+    uint64_t firstPad = (x0 + y0) / (uint64_t(2) * z.B);
+    uint64_t lastPad = (lastX + lastY) / (uint64_t(2) * z.B);
+    ranges.reserve(uint64_t(lastDepth) - firstDepth + 1);
+    for (uint64_t depth = firstDepth; depth <= lastDepth; ++depth)
+        append(depth * z.columns + firstPad, depth * z.columns + lastPad);
+    return ranges;
 }
 } // namespace
 
 struct File::Impl {
     Source source;
+    std::unique_ptr<ZSTD_DCtx, size_t (*)(ZSTD_DCtx *)> decoder;
     Header h;
     std::map<Pair, Locator> matrices;
     std::map<Pair, std::vector<Zoom>> zoomCache;
     // Block indexes are re-read and re-validated on every query otherwise, which
     // a windowed reader (StrawPreparedQuery) pays once per window.
     std::map<uint64_t, std::vector<BlockEntry>> blockIndexCache;
-    explicit Impl(const std::string &path) : source(path) {
+    explicit Impl(const std::string &path)
+        : source(path), decoder(ZSTD_createDCtx(), ZSTD_freeDCtx) {
+        require(decoder != nullptr, "cannot allocate Zstandard decoder");
         auto prefix = source.read(0, 88);
         Cursor c(prefix);
         c.magic("HIC\0");
@@ -444,39 +499,8 @@ struct File::Impl {
         c.done();
         return blockIndexCache.emplace(z.index.pos, std::move(out)).first->second;
     }
-    bool candidate(uint32_t number, const Zoom &z, uint64_t x0, uint64_t x1, uint64_t y0,
-                   uint64_t y1, bool cis) {
-        if (x0 >= x1 || y0 >= y1)
-            return false;
-        auto intersects = [&](uint64_t lo, uint64_t hi) {
-            return lo <= number && number <= hi;
-        };
-        if (z.grid) {
-            uint64_t lo = (x0 + y0) / (2ULL * z.B), hi = (x1 + y1 - 2) / (2ULL * z.B);
-            uint64_t d = std::max(x1 > y0 ? x1 - y0 : 0, y1 > x0 ? y1 - x0 : 0), depth = 0;
-            while (depth < 32 && (1ULL << depth) <= 1 + d / z.B)
-                ++depth;
-            for (uint64_t a = 0; a <= depth; ++a)
-                if (intersects(a * z.columns + lo, a * z.columns + hi))
-                    return true;
-            return false;
-        }
-        auto rect = [&](uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
-            uint64_t loCol = a / z.B, hiCol = (b - 1) / z.B, loRow = c / z.B, hiRow = (d - 1) / z.B;
-            uint64_t firstRow = number / z.columns, lastRow = number / z.columns;
-            uint64_t row = std::max(loRow, firstRow), end = std::min(hiRow, lastRow);
-            if (row > end)
-                return false;
-            if (row < end && end - row > 1)
-                return true;
-            for (; row <= end; ++row)
-                if (intersects(row * z.columns + loCol, row * z.columns + hiCol))
-                    return true;
-            return false;
-        };
-        return rect(x0, x1, y0, y1) || (cis && rect(y0, y1, x0, x1));
-    }
-    void block(Cursor c, uint32_t number, const Zoom &z, Pair key, const Callback &cb) {
+    template <typename Emit>
+    void block(Cursor c, uint32_t number, const Zoom &z, Pair key, Emit &&cb) {
         require(c.byte() == 1, "unknown block version");
         uint8_t rep = c.byte(), mode = c.byte(), type = c.byte(), flags = c.byte();
         c.zero(3);
@@ -492,82 +516,61 @@ struct File::Impl {
         require(x < h.bins(key.first, z.unit, z.ri) && y < h.bins(key.second, z.unit, z.ri),
                 "block offsets exceed chromosome");
         Cursor positions = c.take(np), values = c.take(nv);
-        std::vector<uint64_t> occupied;
         if (rep == 0) {
             require(!flags && n <= np, "invalid sparse position stream");
-            occupied.reserve(n);
-            uint64_t previous = 0;
-            for (uint64_t i = 0; i < n; ++i) {
-                auto d = positions.var();
-                require(!i || d, "duplicate sparse cell");
-                auto p = i ? add(previous, d) : d;
-                require(p < cells, "sparse position out of bounds");
-                occupied.push_back(p);
-                previous = p;
-            }
         } else if (rep == 1 || type == 1) {
             require(flags == 1 && np == (cells + 7) / 8, "invalid presence bitmap");
             if (cells % 8)
                 require((positions.p[np - 1] >> (cells % 8)) == 0, "nonzero bitmap padding");
-            for (uint64_t i = 0; i < cells; ++i)
-                if (positions.p[i / 8] & (1u << (i % 8)))
-                    occupied.push_back(i);
-            require(occupied.size() == n, "bitmap population mismatch");
             positions.at = positions.size;
         } else
             require(!flags && !np, "dense counts have no presence stream");
-        positions.done();
         require(rep != 2 || mode == 2, "dense values must be direct");
         auto scalar = [&]() { return type ? uint64_t(values.word()) : values.var(); };
-        std::vector<uint64_t> decoded;
+        uint64_t defaultValue = 0;
+        std::vector<uint64_t> exceptionOrdinals;
         if (mode == 0) {
-            uint64_t v = scalar();
-            decoded.assign(slots, v);
+            defaultValue = scalar();
         } else if (mode == 1) {
-            uint64_t v = scalar(), ne = values.var();
+            defaultValue = scalar();
+            uint64_t ne = values.var();
             require(ne > 0 && ne < slots && ne <= values.left(), "invalid exception count");
-            std::vector<uint64_t> ordinals;
+            exceptionOrdinals.reserve(static_cast<size_t>(ne));
             uint64_t prev = 0;
             for (uint64_t i = 0; i < ne; ++i) {
                 auto d = values.var();
                 require(!i || d, "duplicate exception ordinal");
                 auto o = i ? add(prev, d) : d;
                 require(o < slots, "exception out of range");
-                ordinals.push_back(o);
+                exceptionOrdinals.push_back(o);
                 prev = o;
             }
-            decoded.assign(slots, v);
-            for (auto o : ordinals) {
-                auto exception = scalar();
-                require(exception != v, "exception equals default");
-                decoded[o] = exception;
-            }
-        } else {
+        } else
             require(slots <= values.left() / (type ? 4 : 1), "truncated values");
-            decoded.reserve(slots);
-            for (uint64_t i = 0; i < slots; ++i)
-                decoded.push_back(scalar());
-        }
-        values.done();
-        uint64_t emitted = 0;
-        size_t oi = 0;
-        for (uint64_t i = 0; i < slots; ++i) {
-            bool present = true;
-            uint64_t pos = rep == 2 ? i : occupied[i], v = decoded[i];
-            if (rep == 2) {
-                if (!type)
-                    present = v != 0;
-                else {
-                    present = oi < occupied.size() && occupied[oi] == i;
-                    if (present)
-                        ++oi;
-                    else
-                        require(v == 0, "absent dense score must be positive zero");
+
+        size_t exceptionIndex = 0;
+        auto valueAt = [&](uint64_t ordinal) {
+            if (mode == 0)
+                return defaultValue;
+            if (mode == 1) {
+                if (exceptionIndex < exceptionOrdinals.size() &&
+                    exceptionOrdinals[exceptionIndex] == ordinal) {
+                    ++exceptionIndex;
+                    auto exception = scalar();
+                    require(exception != defaultValue, "exception equals default");
+                    return exception;
                 }
-            } else if (!type)
-                require(v > 0, "sparse/bitmap count must be positive");
+                return defaultValue;
+            }
+            return scalar();
+        };
+
+        uint64_t emitted = 0;
+        auto emit = [&](uint64_t pos, uint64_t v, bool present) {
             if (!present)
-                continue;
+                return;
+            if (rep != 2 && !type)
+                require(v > 0, "sparse/bitmap count must be positive");
             uint32_t bx = u32(uint64_t(x) + pos % w), by = u32(uint64_t(y) + pos / w);
             require(bx < h.bins(key.first, z.unit, z.ri) && by < h.bins(key.second, z.unit, z.ri) &&
                         (key.first != key.second || by >= bx) && blockNumber(bx, by, z) == number,
@@ -575,40 +578,81 @@ struct File::Impl {
             Record r{bx, by, v, type ? asFloat(static_cast<uint32_t>(v)) : 0.0f, type != 0};
             cb(r);
             ++emitted;
+        };
+
+        uint64_t consumed = 0;
+        if (rep == 0) {
+            uint64_t previous = 0;
+            for (uint64_t i = 0; i < n; ++i) {
+                auto delta = positions.var();
+                require(!i || delta, "duplicate sparse cell");
+                auto pos = i ? add(previous, delta) : delta;
+                require(pos < cells, "sparse position out of bounds");
+                emit(pos, valueAt(i), true);
+                previous = pos;
+                ++consumed;
+            }
+        } else if (rep == 1) {
+            for (uint64_t pos = 0; pos < cells; ++pos) {
+                if (!(positions.p[pos / 8] & (1u << (pos % 8))))
+                    continue;
+                require(consumed < n, "bitmap population mismatch");
+                emit(pos, valueAt(consumed), true);
+                ++consumed;
+            }
+            require(consumed == n, "bitmap population mismatch");
+        } else {
+            for (uint64_t pos = 0; pos < cells; ++pos) {
+                uint64_t v = valueAt(pos);
+                bool present = type ? (positions.p[pos / 8] & (1u << (pos % 8))) != 0 : v != 0;
+                if (type && !present)
+                    require(v == 0, "absent dense score must be positive zero");
+                emit(pos, v, present);
+                ++consumed;
+            }
         }
+        positions.done();
+        require(consumed == slots && exceptionIndex == exceptionOrdinals.size(),
+                "value slot count mismatch");
+        values.done();
         require(emitted == n, "occupied cell count mismatch");
     }
+    template <typename Emit>
     void materialized(Pair key, const Zoom &z, uint64_t x0, uint64_t x1, uint64_t y0, uint64_t y1,
-                      const Callback &cb) {
+                      Emit &&cb) {
         uint64_t totalBlocks = 0, totalCells = 0, sum = 0;
-        bool all = true;
-        for (const auto &entry : blockIndex(z)) {
-            if (!candidate(entry.number, z, x0, x1, y0, y1, key.first == key.second)) {
-                all = false;
-                continue;
+        const auto &index = blockIndex(z);
+        const auto ranges = candidateBlockRanges(z, x0, x1, y0, y1);
+        for (const auto &range : ranges) {
+            auto entry = std::lower_bound(index.begin(), index.end(), range.first,
+                                          [](const BlockEntry &a, uint32_t number) {
+                                              return a.number < number;
+                                          });
+            for (; entry != index.end() && entry->number <= range.second; ++entry) {
+                auto bytes = source.read(entry->pos, entry->len);
+                Cursor c(bytes);
+                c.magic("H10B");
+                require(c.byte() == 1 && c.byte() == 1, "unknown block codec/record version");
+                c.zero(2);
+                uint32_t raw = c.word();
+                require(c.word() == entry->number && raw >= 40, "block record/index mismatch");
+                auto payload = decompress(decoder.get(), c, raw);
+                block(Cursor(payload), entry->number, z, key, [&](const Record &r) {
+                    ++totalCells;
+                    if (!z.type)
+                        sum = add(sum, r.count);
+                    cb(r);
+                });
+                ++totalBlocks;
             }
-            auto bytes = source.read(entry.pos, entry.len);
-            Cursor c(bytes);
-            c.magic("H10B");
-            require(c.byte() == 1 && c.byte() == 1, "unknown block codec/record version");
-            c.zero(2);
-            uint32_t raw = c.word();
-            require(c.word() == entry.number && raw >= 40, "block record/index mismatch");
-            auto payload = decompress(c, raw);
-            block(Cursor(payload), entry.number, z, key, [&](const Record &r) {
-                ++totalCells;
-                if (!z.type)
-                    sum = add(sum, r.count);
-                cb(r);
-            });
-            ++totalBlocks;
         }
-        if (all)
+        if (totalBlocks == index.size())
             require(totalBlocks == z.blocks && totalCells == z.occupied && (z.type || sum == z.sum),
                     "matrix statistics/block count mismatch");
     }
+    template <typename Emit>
     void raw(Pair key, uint8_t unit, uint32_t ri, uint64_t x0, uint64_t x1, uint64_t y0,
-             uint64_t y1, const Callback &cb) {
+             uint64_t y1, Emit &&cb) {
         const Zoom *z = zoom(key, unit, ri);
         if (!z)
             return;
@@ -677,8 +721,8 @@ struct File::Impl {
             }
         }
         for (const auto &e : sums)
-            cb({e.first.second, e.first.first, e.second.count, static_cast<float>(e.second.score),
-                z->type != 0});
+            cb(Record{e.first.second, e.first.first, e.second.count,
+                      static_cast<float>(e.second.score), z->type != 0});
     }
     std::vector<double> vector(uint8_t kind, uint32_t norm, uint32_t chr, uint8_t unit, uint32_t ri,
                                double &scale, uint64_t begin = 0, uint64_t end = UINT64_MAX) {
@@ -765,7 +809,7 @@ struct File::Impl {
                         "vector chunk codec/transform mismatch");
                 chunk.zero(2);
                 require(chunk.word() == raw && chunk.word() == nc, "vector chunk size mismatch");
-                auto data = decompress(chunk, raw);
+                auto data = decompress(decoder.get(), chunk, raw);
                 Cursor values(data);
                 uint32_t prevBits = 0;
                 for (uint32_t k = 0; k < nc; ++k) {
