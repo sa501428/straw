@@ -13,29 +13,49 @@ class PythonMatrixZoomData {
                          std::string matrixUnit, int32_t binSize)
         : fileName(std::move(file)), chr1(std::move(first)), chr2(std::move(second)),
           matrixType(std::move(type)), norm(std::move(normalization)),
-          unit(std::move(matrixUnit)), resolution(binSize) {}
+          unit(std::move(matrixUnit)), resolution(binSize),
+          prepared(new StrawPreparedQuery(fileName, matrixType, norm, chr1.name, chr2.name,
+                                          unit, resolution)) {}
 
     std::vector<contactRecord> getRecords(int64_t x0, int64_t x1, int64_t y0, int64_t y1) const {
-        return straw(matrixType, norm, fileName, location(chr1.name, x0, x1),
-                     location(chr2.name, y0, y1), unit, resolution);
+        std::vector<contactRecord> records;
+        prepared->streamWindow(x0, x1, y0, y1,
+                               [&](const contactRecord &record) { records.push_back(record); });
+        return records;
     }
     py::array getRecordsAsMatrix(int64_t x0, int64_t x1, int64_t y0, int64_t y1) const {
-        return py::array(py::cast(strawAsMatrix(matrixType, norm, fileName,
-                                                location(chr1.name, x0, x1),
-                                                location(chr2.name, y0, y1), unit, resolution)));
+        const auto records = getRecords(x0, x1, y0, y1);
+        const int64_t firstX = x0 / resolution;
+        const int64_t lastX = x0 == x1 ? firstX : x1 / resolution + (x1 % resolution != 0);
+        const int64_t firstY = y0 / resolution;
+        const int64_t lastY = y0 == y1 ? firstY : y1 / resolution + (y1 % resolution != 0);
+        std::vector<std::vector<float>> matrix(
+            static_cast<size_t>(lastX - firstX),
+            std::vector<float>(static_cast<size_t>(lastY - firstY), 0));
+        for (const auto &record : records) {
+            const int64_t bx = record.binX / resolution, by = record.binY / resolution;
+            if (bx >= firstX && bx < lastX && by >= firstY && by < lastY)
+                matrix[static_cast<size_t>(bx - firstX)][static_cast<size_t>(by - firstY)] =
+                    record.counts;
+            if (chr1.index == chr2.index && bx != by && by >= firstX && by < lastX &&
+                bx >= firstY && bx < lastY)
+                matrix[static_cast<size_t>(by - firstX)][static_cast<size_t>(bx - firstY)] =
+                    record.counts;
+        }
+        return py::array(py::cast(matrix));
     }
     std::vector<double> getNormVector(int32_t chromosomeIndex) const {
         std::vector<double> values;
         const chromosome *selected = chromosomeIndex == chr1.index ? &chr1 :
                                      chromosomeIndex == chr2.index ? &chr2 : nullptr;
         if (!selected || norm == "NONE") return values;
-        if (!getNormalizationVectorForFile(fileName, selected->name, resolution, norm, values))
+        if (!getNormalizationVectorForFile(fileName, selected->name, resolution, norm, values, unit))
             throw std::runtime_error("normalization vector is not available");
         return values;
     }
     std::vector<double> getExpectedValues() const {
         std::vector<double> values;
-        if (!getExpectedVectorForFile(fileName, chr1.name, resolution, norm, values))
+        if (!getExpectedVectorForFile(fileName, chr1.name, resolution, norm, values, unit))
             throw std::runtime_error("expected-value vector is not available");
         return values;
     }
@@ -48,23 +68,20 @@ class PythonMatrixZoomData {
     chromosome chr1, chr2;
     std::string matrixType, norm, unit;
     int32_t resolution;
+    std::unique_ptr<StrawPreparedQuery> prepared;
 };
 
 class PythonHiCFile {
   public:
     explicit PythonHiCFile(std::string path) : fileName(std::move(path)) {
-        if (straw_v10::isV10(fileName)) {
-            straw_v10::File file(fileName);
-            genomeID = file.genome();
-        } else {
-            legacy.reset(new HiCFile(fileName));
-            genomeID = legacy->getGenomeID();
-        }
-        chromosomes = getChromosomesForFile(fileName);
+        const StrawFileInfo info = getFileInfo(fileName);
+        genomeID = info.genome;
+        chromosomes = info.chromosomes;
+        resolutions = info.bpResolutions;
         for (const auto &c : chromosomes) chromosomeByName[c.name] = c;
     }
     std::string getGenomeID() const { return genomeID; }
-    std::vector<int32_t> getResolutions() const { return getResolutionsForFile(fileName); }
+    std::vector<int32_t> getResolutions() const { return resolutions; }
     std::vector<chromosome> getChromosomes() const { return chromosomes; }
     PythonMatrixZoomData *getMatrixZoomData(const std::string &first, const std::string &second,
                                             const std::string &type, const std::string &normalization,
@@ -79,8 +96,8 @@ class PythonHiCFile {
   private:
     std::string fileName;
     std::string genomeID;
-    std::unique_ptr<HiCFile> legacy;
     std::vector<chromosome> chromosomes;
+    std::vector<int32_t> resolutions;
     std::map<std::string, chromosome> chromosomeByName;
 };
 
