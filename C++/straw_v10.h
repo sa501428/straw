@@ -26,6 +26,9 @@ class File {
     File &operator=(const File &) = delete;
     std::vector<chromosome> chromosomes() const;
     std::vector<int32_t> resolutions(const std::string &unit = "BP") const;
+    // Subset of resolutions() that stores no matrix of its own and is instead
+    // aggregated from a finer source resolution at query time.
+    std::vector<int32_t> derivedResolutions(const std::string &unit = "BP") const;
     std::string genome() const;
     std::vector<std::string> normalizations() const;
     std::vector<std::pair<std::string, std::string>> attributes() const;

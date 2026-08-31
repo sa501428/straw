@@ -868,6 +868,12 @@ std::vector<int32_t> File::resolutions(const std::string &unit) const {
         out.push_back(static_cast<int32_t>(r.bin));
     return out;
 }
+std::vector<int32_t> File::derivedResolutions(const std::string &unit) const {
+    std::vector<int32_t> out;
+    for (auto r : impl->h.resolutions[unitId(unit)])
+        if (r.mode) out.push_back(static_cast<int32_t>(r.bin));
+    return out;
+}
 std::string File::genome() const { return impl->h.genome; }
 std::vector<std::string> File::normalizations() const { return impl->h.norms; }
 std::vector<std::pair<std::string, std::string>> File::attributes() const { return impl->h.attributes; }

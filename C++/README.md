@@ -70,6 +70,83 @@ invalid arguments or an unreadable/invalid input. The summary reports the exact
 amount of matrix, cell, and vector coverage, so a sampled result is not confused
 with a byte-for-byte or fully exhaustive comparison.
 
+### Randomized region sampling
+
+Instead of the fixed 256-bin windows, regions can be drawn at random across
+sizes, diagonal distances, and resolutions. Sizes and distances are drawn
+log-uniformly so that small and large values get comparable coverage; distances
+are drawn in bins rather than base pairs so a coarse resolution does not collapse
+every draw onto the diagonal. Everything is seeded, so a run is reproducible.
+
+```sh
+# Vary the region size within the normal per-pair sweep.
+build/straw compare a.hic b.hic --min-window-bins 8 --max-window-bins 2048
+
+# Sweep intra-chromosomal regions from near-diagonal to 100 Mb apart.
+build/straw compare a.hic b.hic --vary-distance --min-distance 0 --max-distance 100000000
+
+# Draw 500 fully random (chromosome pair, resolution, size, distance) regions
+# instead of walking every pair, restricted to three random shared resolutions.
+build/straw compare a.hic b.hic --random-regions 500 --sample-resolutions 3 \
+  --min-window-bins 4 --max-window-bins 1024 --vary-distance --intra-fraction 0.7
+```
+
+| Option | Effect |
+| --- | --- |
+| `--min-window-bins N` / `--max-window-bins N` | draw region widths log-uniformly in that range (default: fixed `--window-bins`) |
+| `--vary-distance` | draw the diagonal offset of intra regions log-uniformly |
+| `--min-distance BP` / `--max-distance BP` | bound the diagonal offset (either implies `--vary-distance`) |
+| `--resolution BP` | restrict to a shared resolution; repeatable |
+| `--sample-resolutions N` | randomly keep N of the shared resolutions |
+| `--random-regions N` | draw N random regions globally instead of walking every pair |
+| `--intra-fraction P` | share of random regions that are intra-chromosomal (default 0.5) |
+| `--skip-vectors` | compare regions only, for a pure region-read benchmark |
+
+### Stratified sweep
+
+`--stratified N` draws, **for every resolution**, N regions in each of four
+strata: near-diagonal, mid-range, far-from-diagonal, and inter-chromosomal.
+Within a stratum the draws cycle through a shuffled list of eligible
+chromosomes, so N draws hit N distinct chromosomes (or chromosome pairs) before
+repeating. Band edges are `--near-max BP` (default 1 Mb) and `--mid-max BP`
+(default 10 Mb). A chromosome too short to host a band is excluded, and a
+stratum with no eligible chromosome is reported as skipped rather than silently
+dropped.
+
+This is the mode to use for a head-to-head reader benchmark: the report ends
+with a per-(resolution, stratum) table of median region-read latency for each
+file, the ratio, and which file won. Reads alternate which file goes first, so
+the file read second does not pick up a warm-page-cache advantage.
+
+Derived resolutions — those a V10 file stores no matrix for and aggregates from
+a finer source at query time — are covered like any other, and are marked
+`[derived]` in the timing tables (`[derived:1st]` / `[derived:2nd]` when only one
+file computes them on the fly), since they cost the reader extra work.
+
+### Timing metrics
+
+Every query is timed, and a report is printed unless `--no-timing` is given. It
+covers region reads, normalization vectors, and expected vectors for each file,
+with count, total, mean, p50, p95, max, and throughput, plus breakdowns of region
+reads by resolution, by region size, and by diagonal distance. Because each query
+re-opens the file and parses its header, the numbers reflect a cold per-query
+cost, which is what a caller issuing independent queries actually pays.
+
+```sh
+# Benchmark a V9 reader against a V10 reader over a balanced sweep: 25 regions
+# per stratum per resolution, sizes from 8 to 512 bins, each region read three
+# times, with the per-query rows kept for offline analysis.
+build/straw compare file1.v9.hic file1.v10.hic --stratified 25 \
+  --min-window-bins 8 --max-window-bins 512 --repeat 3 --timing-csv timings.csv
+```
+
+`--repeat N` reads each region N times on both files, timing every read while
+comparing only the first; the first read of a region is cold and later ones are
+warm, so the spread across repeats separates I/O from decode cost.
+`--timing-csv PATH` writes one row per query with columns `type, file, path,
+chrom1, chrom2, resolution, norm, x0, x1, y0, y1, width_bins, distance, records,
+seconds, iteration`.
+
 ## Subsample to weighted short text
 
 Export raw `observed NONE` contacts from V6–V9 or V10 to stdout:
