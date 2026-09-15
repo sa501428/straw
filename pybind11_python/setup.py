@@ -7,6 +7,26 @@ import os
 __version__ = '1.4.0'
 
 
+def existing_paths(*paths):
+    """Return only dependency paths that exist on the current platform."""
+    return [path for path in paths if path and os.path.isdir(path)]
+
+
+zstd_prefix = os.environ.get('ZSTD_PREFIX', '')
+zstd_include_dirs = existing_paths(
+    os.environ.get('STRAW_ZSTD_INCLUDE', ''),
+    os.path.join(zstd_prefix, 'include') if zstd_prefix else '',
+    '/opt/homebrew/opt/zstd/include',
+    '/usr/local/include',
+)
+zstd_library_dirs = existing_paths(
+    os.environ.get('STRAW_ZSTD_LIB', ''),
+    os.path.join(zstd_prefix, 'lib') if zstd_prefix else '',
+    '/opt/homebrew/opt/zstd/lib',
+    '/usr/local/lib',
+)
+
+
 def read(fname):
     return open(os.path.join(os.path.dirname(__file__), fname)).read()
 
@@ -34,7 +54,8 @@ ext_modules = [
             # Path to pybind11 headers
             GetPybindInclude(),
             GetPybindInclude(user=True)
-        ],
+        ] + zstd_include_dirs,
+        library_dirs=zstd_library_dirs,
         language='c++'
     ),
 ]
