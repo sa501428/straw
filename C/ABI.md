@@ -36,6 +36,10 @@ and kind arrays. Count records retain their exact uint64 values; score records
 retain the stored float32 value. Exact raw access is rejected for legacy files,
 whose source values already use legacy floating-point storage.
 
+Numeric query coordinates are consumed as supplied. The ABI does not require,
+infer, convert, or record whether a caller's values originated in a zero-based
+or one-based convention. Stored/raw bin indices remain ordinary array indices.
+
 ## Contact orientation
 
 The first coordinate always corresponds to the first chromosome or region in

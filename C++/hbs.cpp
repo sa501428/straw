@@ -1,4 +1,5 @@
 #include "hbs.h"
+#include <algorithm>
 #include <cstdio>
 #include <set>
 #include <stdexcept>
@@ -77,18 +78,26 @@ HbsWriter::~HbsWriter() {
 
 void HbsWriter::record(const chromosome& a, uint64_t x, const chromosome& b, uint64_t y, uint64_t count) {
     if (!count) return;
-    if (x >= static_cast<uint64_t>(a.length) || y >= static_cast<uint64_t>(b.length) ||
-        x % resolution_ || y % resolution_ || x / resolution_ > UINT32_MAX || y / resolution_ > UINT32_MAX)
-        throw std::runtime_error("HBS: bin start outside chromosome or coordinate range");
+    auto bin = [&](uint64_t position, const chromosome& chromosome) {
+        const uint64_t length = static_cast<uint64_t>(chromosome.length);
+        if (position > length || (position != length && position % resolution_))
+            throw std::runtime_error("HBS: bin start outside chromosome or coordinate range");
+        const uint64_t bins = length / resolution_ + (length % resolution_ != 0);
+        const uint64_t value = std::min(position / resolution_, bins - 1);
+        if (value > UINT32_MAX)
+            throw std::runtime_error("HBS: bin start outside chromosome or coordinate range");
+        return value;
+    };
+    const uint64_t xBin = bin(x, a), yBin = bin(y, b);
     unsigned char data[22];
     unsigned size = 0;
     auto append = [&](uint64_t value, unsigned width) {
         for (unsigned i = 0; i < width; ++i) data[size++] = static_cast<unsigned char>(value >> (8 * i));
     };
     append(ids_.at(a.index), 2);
-    append(x / resolution_, 4);
+    append(xBin, 4);
     append(ids_.at(b.index), 2);
-    append(y / resolution_, 4);
+    append(yBin, 4);
     append(count < 65535 ? count : 65535, 2);
     if (count >= 65535) append(count, 8);
     bytes(data, size);

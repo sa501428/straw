@@ -858,6 +858,9 @@ struct File::Impl {
             };
             a = number(location.substr(colon + 1, second - colon - 1));
             b = number(location.substr(second + 1));
+            // Consume the caller's numeric values directly. V10 does not
+            // classify or convert their coordinate origin; this API's end is
+            // exclusive and may equal the chromosome length.
             require(a <= b && b <= length, "region out of bounds");
         }
         uint64_t bin = h.resolutions[unit][ri].bin;

@@ -6,7 +6,9 @@ To learn more about Hi-C data and 3D genomics, visit https://aidenlab.gitbook.io
 The reader supports legacy V6-V9 files and consolidated-format V10 files. V10
 queries include materialized and derived resolutions, Zstandard-compressed
 blocks and vectors, BP/FRAG units, and normalization and expected-value data.
-Region ends are exclusive for V10, matching the V10 format specification.
+Numeric V10 region values are consumed as supplied without requiring or
+inferring a coordinate origin; the current `start:end` API treats `end` as an
+exclusive numeric boundary.
 Slice and HBS creation are intentionally C++-only and are not exposed by the
 Python module.
 

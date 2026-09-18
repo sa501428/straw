@@ -168,10 +168,13 @@ Output has no header and uses five tab-separated columns:
 chr1    pos1    chr2    pos2    count
 ```
 
-Positions are zero-based BP bin starts. All real cis and trans chromosome pairs
-are included, with each stored cell emitted once; the synthetic `ALL` overview
-is excluded. Chromosome pairs remain contiguous for the preprocessors. Cells
-with zero retained contacts are omitted. Diagnostics go to stderr.
+Positions are numeric BP bin starts computed as `bin_index * resolution`. They
+are emitted as stored, without assigning or recording a pair-level coordinate
+origin; preprocessors consume the values as supplied. All real cis and trans
+chromosome pairs are included, with each stored cell emitted once; the synthetic
+`ALL` overview is excluded. Chromosome pairs remain contiguous for the
+preprocessors. Cells with zero retained contacts are omitted. Diagnostics go to
+stderr.
 
 The default is the finest BP resolution with nonzero real-chromosome counts.
 Empty resolutions are skipped automatically, including ALL-only resolutions
@@ -307,8 +310,9 @@ The reader enforces the fixed high-resolution pyramid: 20 and 50 bp derive from
 materialized. Experimental V10 files that materialized one of those five virtual
 levels are rejected as nonconforming and must be rebuilt.
 
-V10 region ends are **exclusive**. Queries include bins overlapping the requested
-interval. Reversed chromosome queries return coordinates in the requested
+V10 region values are accepted as supplied without classifying them as zero-based
+or one-based. The current `start:end` API uses `end` as an exclusive numeric
+boundary and includes bins overlapping that interval. Reversed chromosome queries return coordinates in the requested
 chromosome order. Cis sparse queries emit each canonical cell once, transposing
 it when only its reflected position intersects the window; `MATRIX` output fills
 both symmetric entries. FRAG locations use fragment coordinates, and reported

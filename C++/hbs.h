@@ -11,6 +11,8 @@ public:
     ~HbsWriter();
     HbsWriter(const HbsWriter&) = delete;
     HbsWriter& operator=(const HbsWriter&) = delete;
+    // Numeric positions are consumed as supplied in [0, chromosome length];
+    // the terminal endpoint aliases the final real matrix bin.
     void record(const chromosome& a, uint64_t x, const chromosome& b, uint64_t y, uint64_t count);
     void finish();
 private:

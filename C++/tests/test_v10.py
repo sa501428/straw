@@ -156,6 +156,13 @@ def main():
         path = pathlib.Path(d) / 'test.hic'
         other = pathlib.Path(d) / 'other.hic'
         fixture(path)
+        # Region numbers are consumed as supplied: both numeric endpoints are
+        # valid, while a value beyond the chromosome length is not.
+        run([straw, 'observed', 'NONE', path, 'chrA:0:80', 'chrA:1:80', 'BP', 10])
+        assert run([straw, 'observed', 'NONE', path, 'chrA:80:80',
+                    'chrA:80:80', 'BP', 10]) == ''
+        run([straw, 'observed', 'NONE', path, 'chrA:0:81', 'chrA', 'BP', 10],
+            ok=False)
         assert 'RESULT: IDENTICAL WITHIN TOLERANCE' in run(
             [straw, 'compare', path, path, '--all'])
         fixture(other, values=(1, 1, 6))
