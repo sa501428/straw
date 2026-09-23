@@ -305,9 +305,9 @@ transforms. Derived matrices aggregate raw source cells before applying the
 and corrupt records raise errors; a missing chromosome pair is an empty matrix.
 V10 expected/OE queries are defined for cis matrices only.
 
-The reader enforces the fixed high-resolution pyramid: 20 and 50 bp derive from
-10 bp, 200 and 500 bp from 100 bp, and 2 kb from 1 kb. The 500 kb level must be
-materialized. Experimental V10 files that materialized one of those five virtual
+The reader enforces the fixed high-resolution pyramid: 2 and 5 bp derive from
+1 bp, 20 and 50 bp from 10 bp, 200 and 500 bp from 100 bp, and 2 kb from 1 kb. The 500 kb level must be
+materialized. Experimental V10 files that materialized one of those seven virtual
 levels are rejected as nonconforming and must be rebuilt.
 
 V10 region values are accepted as supplied without classifying them as zero-based

@@ -203,6 +203,7 @@ Header parseHeader(const Bytes &bytes) {
         }
     }
     auto requiredSource = [](uint32_t bin) -> uint32_t {
+        if (bin == 2 || bin == 5) return 1;
         if (bin == 20 || bin == 50) return 10;
         if (bin == 200 || bin == 500) return 100;
         if (bin == 2000) return 1000;
