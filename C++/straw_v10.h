@@ -32,6 +32,10 @@ class File {
     std::string genome() const;
     std::vector<std::string> normalizations() const;
     std::vector<std::pair<std::string, std::string>> attributes() const;
+    // True when the chromosome pair has a matrix descriptor at this unit and
+    // resolution. An existing, legitimately empty matrix still returns true.
+    bool hasMatrix(const std::string &chr1, const std::string &chr2,
+                   const std::string &unit, int32_t resolution);
     // Coordinates are bin indices; end positions are exclusive. Raw counts
     // remain uint64_t, including during derived-resolution aggregation.
     void raw(const std::string &chr1, const std::string &chr2, const std::string &unit,

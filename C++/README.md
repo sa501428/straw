@@ -44,9 +44,19 @@ API so integer counts are not rounded to float before comparison.
 By default every chromosome pair is checked exhaustively at shared resolutions
 of 100 kb and coarser (and always at the coarsest shared resolution). At finer
 resolutions it checks four deterministic 256-by-256-bin windows for every pair.
-Vectors are exhaustive at coarse resolutions and deterministically sampled at
-fine resolutions. `ALL` is excluded. Missing chromosomes/resolutions or a
-capability present in only one file count as differences.
+Half of those fine-resolution windows are guided by a reservoir of occupied
+bins from the preceding coarser resolution; the other half remain random so
+equal coarse aggregates cannot conceal relocated fine contacts.
+Normalization vectors are exhaustive once loaded; expected vectors are
+exhaustive at coarse resolutions and deterministically sampled at fine
+resolutions. `ALL` is excluded. Missing chromosomes/resolutions or a capability
+present in only one file count as differences. A matrix or vector unavailable
+in both files is skipped and counted in the summary.
+
+Raw regions from both files are streamed concurrently into a sharded sparse
+delta. Exact matches are removed immediately; only non-cancelling cells remain
+for tolerance checks and `sum(abs(A-B))` reporting. This avoids retaining two
+whole sparse matrices during an exhaustive high-resolution comparison.
 
 ```sh
 # Practical thorough comparison (the default strategy).
@@ -60,7 +70,7 @@ build/straw compare a.hic b.hic --samples 12 --window-bins 512 \
   --abs-tol 1e-5 --rel-tol 1e-5 --seed 42
 
 # Probe an additional/custom normalization name. Repeating --norm replaces
-# the default VC, VC_SQRT, and KR list.
+# the default VC, VC_SQRT, KR, and SCALE list.
 build/straw compare a.hic b.hic --norm SCALE --norm VC
 ```
 

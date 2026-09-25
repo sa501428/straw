@@ -3,14 +3,18 @@
 #include "straw_v10.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <cstdlib>
 #include <fstream>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <random>
 #include <set>
 #include <sstream>
@@ -18,6 +22,7 @@
 #include <memory>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -55,7 +60,7 @@ struct Options {
     bool exhaustiveAll = false;
     bool timing = true;
     std::string timingCsv;
-    std::vector<std::string> norms{"VC", "VC_SQRT", "KR"};
+    std::vector<std::string> norms{"VC", "VC_SQRT", "KR", "SCALE"};
 
     uint64_t windowLow() const {
         return std::max<uint64_t>(1, minWindowBins ? minWindowBins : windowBins);
@@ -67,12 +72,58 @@ struct Options {
 };
 
 struct Summary {
-    uint64_t metadata = 0, matrices = 0, windows = 0, cells = 0;
-    uint64_t vectors = 0, vectorValues = 0, differences = 0;
+    uint64_t metadata = 0, matrices = 0, windows = 0, contactRecords = 0;
+    uint64_t residualCells = 0, skippedMatrices = 0, guidedWindows = 0;
+    uint64_t vectors = 0, vectorValues = 0, skippedVectors = 0, differences = 0;
+    long double absoluteRawDelta = 0;
 };
 
 using Cell = std::pair<uint64_t, uint64_t>;
-using Cells = std::map<Cell, double>;
+
+struct CellHash {
+    size_t operator()(const Cell &cell) const {
+        size_t a = std::hash<uint64_t>{}(cell.first);
+        size_t b = std::hash<uint64_t>{}(cell.second);
+        return a ^ (b + size_t(0x9e3779b9) + (a << 6) + (a >> 2));
+    }
+};
+
+struct CellValues {
+    double value[2] = {0, 0};
+};
+
+// Both readers feed this structure concurrently. Exact matches are erased as
+// soon as they cancel, so exhaustive fine-resolution comparisons retain only
+// the portion of A-B that has not matched yet instead of two complete maps.
+class SparseDifference {
+    static constexpr size_t shardCount = 64;
+    struct Shard {
+        std::mutex mutex;
+        std::unordered_map<Cell, CellValues, CellHash> cells;
+    };
+    std::array<Shard, shardCount> shards;
+
+  public:
+    void add(int which, const Cell &cell, double value) {
+        Shard &shard = shards[CellHash{}(cell) % shardCount];
+        std::lock_guard<std::mutex> lock(shard.mutex);
+        auto inserted = shard.cells.emplace(cell, CellValues{});
+        CellValues &values = inserted.first->second;
+        values.value[which] += value;
+        if (values.value[0] == values.value[1]) shard.cells.erase(inserted.first);
+    }
+
+    std::vector<std::pair<Cell, CellValues>> remaining() const {
+        std::vector<std::pair<Cell, CellValues>> out;
+        for (const auto &shard : shards)
+            for (const auto &entry : shard.cells) out.push_back(entry);
+        std::sort(out.begin(), out.end(), [](const std::pair<Cell, CellValues> &a,
+                                             const std::pair<Cell, CellValues> &b) {
+            return a.first < b.first;
+        });
+        return out;
+    }
+};
 
 // ---------------------------------------------------------------------------
 // Timing
@@ -428,6 +479,57 @@ Region sampleRegion(std::mt19937_64 &rng, const Options &o, const std::string &c
     return r;
 }
 
+struct AnchorSample {
+    int32_t resolution = 0;
+    size_t limit = 0;
+    uint64_t seen = 0;
+    std::mt19937_64 rng;
+    std::vector<Cell> cells;
+
+    AnchorSample() : rng(1) {}
+    AnchorSample(int32_t r, size_t n, uint64_t seed) : resolution(r), limit(n), rng(seed) {
+        cells.reserve(n);
+    }
+    void add(const Cell &cell) {
+        ++seen;
+        if (cells.size() < limit) cells.push_back(cell);
+        else {
+            uint64_t slot = rng() % seen;
+            if (slot < limit) cells[size_t(slot)] = cell;
+        }
+    }
+};
+
+// Pick a fine-resolution window from an occupied bin observed at a previously
+// checked coarser resolution. Random jitter within that bin avoids repeatedly
+// probing its upper-left corner. Callers mix these with ordinary random windows
+// so a matching coarse aggregate cannot hide rearranged fine contacts.
+Region sampleGuidedRegion(std::mt19937_64 &rng, const Options &o, const std::string &chr1,
+                          const std::string &chr2, int32_t resolution, uint64_t xlen,
+                          uint64_t ylen, const Cell &anchor, int32_t anchorResolution) {
+    Region r = sampleRegion(rng, o, chr1, chr2, resolution, xlen, ylen);
+    const uint64_t res = uint64_t(resolution);
+    const uint64_t coarse = uint64_t(anchorResolution);
+    uint64_t targetX = std::min<uint64_t>(xlen ? xlen - 1 : 0,
+        anchor.first * coarse + (coarse ? rng() % coarse : 0));
+    uint64_t targetY = std::min<uint64_t>(ylen ? ylen - 1 : 0,
+        anchor.second * coarse + (coarse ? rng() % coarse : 0));
+    uint64_t widthX = r.x1 - r.x0, widthY = r.y1 - r.y0;
+    auto place = [res](uint64_t target, uint64_t width, uint64_t length) {
+        if (width >= length) return uint64_t(0);
+        uint64_t start = target > width / 2 ? target - width / 2 : 0;
+        start = (start / res) * res;
+        uint64_t last = ((length - width) / res) * res;
+        return std::min(start, last);
+    };
+    r.x0 = place(targetX, widthX, xlen);
+    r.y0 = place(targetY, widthY, ylen);
+    r.x1 = std::min(xlen, r.x0 + widthX);
+    r.y1 = std::min(ylen, r.y0 + widthY);
+    r.distance = chr1 == chr2 ? std::llabs(int64_t(r.y0) - int64_t(r.x0)) : -1;
+    return r;
+}
+
 // ---------------------------------------------------------------------------
 // Comparison
 // ---------------------------------------------------------------------------
@@ -451,7 +553,6 @@ std::string location(const std::string &chr, uint64_t begin, uint64_t end) {
 }
 
 struct Read {
-    Cells cells;
     double seconds = 0;
     uint64_t records = 0;
 };
@@ -485,21 +586,35 @@ struct Reader {
         }
         return *found->second;
     }
+
+    bool hasMatrix(const std::string &chr1, const std::string &chr2, int32_t resolution) {
+        if (v10) return file->hasMatrix(chr1, chr2, "BP", resolution);
+        try {
+            (void)query(chr1, chr2, resolution);
+            return true;
+        } catch (const StrawException &error) {
+            if (error.code() == StrawErrorCode::Unavailable) return false;
+            throw;
+        }
+    }
 };
 
-Read rawCells(Reader &reader, const Region &r) {
+using CellCallback = std::function<void(const Cell &, double)>;
+
+Read streamRawCells(Reader &reader, const Region &r, const CellCallback &callback) {
     Read out;
     const int32_t resolution = r.resolution;
     auto add = [&](uint64_t x, uint64_t y, double value) {
-        ++out.records;
         // Legacy queries can include a bin touching the inclusive region end.
         // Filtering here gives both readers identical half-open semantics.
         bool direct = x >= r.x0 && x < r.x1 && y >= r.y0 && y < r.y1;
         bool reflected = r.chr1 == r.chr2 && y >= r.x0 && y < r.x1 && x >= r.y0 && x < r.y1;
         if (!direct && !reflected) return;
         if (!direct) std::swap(x, y);
-        out.cells[{x / static_cast<uint64_t>(resolution), y / static_cast<uint64_t>(resolution)}] +=
-            value;
+        ++out.records;
+        if (callback)
+            callback({x / static_cast<uint64_t>(resolution),
+                      y / static_cast<uint64_t>(resolution)}, value);
     };
     if (reader.v10) {
         const std::string a = location(r.chr1, r.x0, r.x1), b = location(r.chr2, r.y0, r.y1);
@@ -525,20 +640,14 @@ Read rawCells(Reader &reader, const Region &r) {
     return out;
 }
 
-void compareCells(const Cells &a, const Cells &b, const Options &o, Summary &s,
+void compareCells(const SparseDifference &delta, const Options &o, Summary &s,
                   const std::string &context) {
-    auto i = a.begin(), j = b.begin();
-    while (i != a.end() || j != b.end()) {
-        Cell key;
-        double av = 0, bv = 0;
-        if (j == b.end() || (i != a.end() && i->first < j->first)) {
-            key = i->first; av = i->second; ++i;
-        } else if (i == a.end() || j->first < i->first) {
-            key = j->first; bv = j->second; ++j;
-        } else {
-            key = i->first; av = i->second; bv = j->second; ++i; ++j;
-        }
-        ++s.cells;
+    auto cells = delta.remaining();
+    s.residualCells += cells.size();
+    for (const auto &entry : cells) {
+        const Cell &key = entry.first;
+        double av = entry.second.value[0], bv = entry.second.value[1];
+        s.absoluteRawDelta += std::fabs(av - bv);
         if (!closeEnough(av, bv, o.absTol, o.relTol)) {
             std::ostringstream m;
             m << context << " bin(" << key.first << ',' << key.second << ") "
@@ -574,6 +683,14 @@ void compareVector(const std::string &kind, const std::string &chr, int32_t reso
                           " length " + std::to_string(a.size()) + " != " + std::to_string(b.size()));
     }
     size_t n = std::min(a.size(), b.size());
+    // Identical vectors are overwhelmingly the common case. libc's vectorized
+    // comparison is much cheaper than millions of tolerance/NaN checks; values
+    // with distinct encodings (+0/-0 or NaN payloads) fall through to the
+    // numerical comparison below.
+    if (exhaustive && n && std::memcmp(a.data(), b.data(), n * sizeof(double)) == 0) {
+        s.vectorValues += n;
+        return;
+    }
     std::vector<size_t> indices;
     if (exhaustive || n <= o.windowHigh() * std::max<size_t>(1, o.samples)) {
         indices.resize(n);
@@ -611,7 +728,7 @@ const char *usage() {
            "    --exhaustive-at BP        resolutions at or above BP are exhaustive (default 100000)\n"
            "    --samples N               sampled regions per chromosome pair (default 4)\n"
            "    --max-errors N            differences printed before suppression (default 20)\n"
-           "    --norm NAME               normalization to check (repeatable; default VC VC_SQRT KR)\n"
+           "    --norm NAME               normalization to check (repeatable; default VC VC_SQRT KR SCALE)\n"
            "  region sampling:\n"
            "    --window-bins N           fixed sampled region width in bins (default 256)\n"
            "    --min-window-bins N       sample region widths log-uniformly from N ...\n"
@@ -744,8 +861,10 @@ int compareMain(int argc, char *argv[]) {
             std::mt19937_64 rng(o.seed ^ 0x9e3779b97f4a7c15ull);
             std::shuffle(resolutions.begin(), resolutions.end(), rng);
             resolutions.resize(o.sampleResolutions);
-            std::sort(resolutions.begin(), resolutions.end());
         }
+        // Coarse-to-fine order lets occupied coarse bins guide later
+        // high-resolution spot checks.
+        std::sort(resolutions.begin(), resolutions.end(), std::greater<int32_t>());
         int32_t coarsest = *std::max_element(resolutions.begin(), resolutions.end());
         // Canonical bin counts: when one file is V10, its ceil(length/bin)
         // convention is the reference the other is compared against.
@@ -761,26 +880,70 @@ int compareMain(int argc, char *argv[]) {
         readers[0].open(o.first);
         readers[1].open(o.second);
 
-        auto check = [&](const Region &r) {
+        // 1 = present in both, 0 = absent in both, -1 = availability differs.
+        // Cache the result because sampled/benchmark modes can visit one matrix
+        // many times; availability is a matrix property, not a window property.
+        using MatrixKey = std::tuple<std::string, std::string, int32_t>;
+        std::map<MatrixKey, int> matrixAvailability;
+        auto matrixIsComparable = [&](const Region &r) {
+            MatrixKey key(r.chr1, r.chr2, r.resolution);
+            auto known = matrixAvailability.find(key);
+            if (known != matrixAvailability.end()) return known->second == 1;
+            bool first = readers[0].hasMatrix(r.chr1, r.chr2, r.resolution);
+            bool second = readers[1].hasMatrix(r.chr1, r.chr2, r.resolution);
+            int state = first == second ? (first ? 1 : 0) : -1;
+            matrixAvailability.emplace(key, state);
+            std::string label = r.chr1 + "/" + r.chr2 + " @" +
+                                std::to_string(r.resolution);
+            if (!state) {
+                ++s.skippedMatrices;
+            } else if (state < 0) {
+                difference(s, o, "raw matrix availability differs for " + label +
+                                  (first ? " (first only)" : " (second only)"));
+            }
+            return state == 1;
+        };
+
+        auto check = [&](const Region &r, AnchorSample *anchors) {
+            if (!matrixIsComparable(r)) return;
             ++s.windows;
             std::string context = r.chr1 + "/" + r.chr2 + " @" + std::to_string(r.resolution) +
                 " [" + std::to_string(r.x0) + "," + std::to_string(r.x1) + ")x[" +
                 std::to_string(r.y0) + "," + std::to_string(r.y1) + ")";
-            Cells first, second;
+            SparseDifference delta;
             for (size_t iteration = 0; iteration < o.repeat; ++iteration) {
-                // Whichever file is read second benefits from a warm OS cache,
-                // so alternate the order: a systematic bias would
-                // otherwise show up as a spurious speed difference.
-                bool secondLeads = (s.windows + iteration) % 2 == 0;
-                Read lead = rawCells(readers[secondLeads ? 1 : 0], r);
-                Read trail = rawCells(readers[secondLeads ? 0 : 1], r);
-                Read &a = secondLeads ? trail : lead;
-                Read &b = secondLeads ? lead : trail;
+                Read a, b;
+                if (iteration == 0) {
+                    // Stream A and B at the same time. Matching cells disappear
+                    // from the sharded delta immediately, which bounds memory
+                    // by the readers' skew plus genuine differences.
+                    auto first = std::async(std::launch::async, [&]() {
+                        return streamRawCells(readers[0], r, [&](const Cell &cell, double value) {
+                            if (anchors) anchors->add(cell);
+                            delta.add(0, cell, value);
+                        });
+                    });
+                    auto second = std::async(std::launch::async, [&]() {
+                        return streamRawCells(readers[1], r, [&](const Cell &cell, double value) {
+                            delta.add(1, cell, value);
+                        });
+                    });
+                    a = first.get();
+                    b = second.get();
+                } else {
+                    // Alternate serial repeat order so timing-only warm reads
+                    // do not systematically favour the same file.
+                    bool secondLeads = (s.windows + iteration) % 2 == 0;
+                    Read lead = streamRawCells(readers[secondLeads ? 1 : 0], r, CellCallback());
+                    Read trail = streamRawCells(readers[secondLeads ? 0 : 1], r, CellCallback());
+                    a = secondLeads ? trail : lead;
+                    b = secondLeads ? lead : trail;
+                }
                 bench.region(0, r, a.seconds, a.records, iteration);
                 bench.region(1, r, b.seconds, b.records, iteration);
-                if (iteration == 0) { first = std::move(a.cells); second = std::move(b.cells); }
+                if (iteration == 0) s.contactRecords += a.records + b.records;
             }
-            compareCells(first, second, o, s, context);
+            compareCells(delta, o, s, context);
         };
 
         std::cout << "Comparing " << commonChroms.size() << " chromosomes at " << resolutions.size()
@@ -830,12 +993,12 @@ int compareMain(int argc, char *argv[]) {
                                                     resolution, chromLength(std::min(x, y)),
                                                     chromLength(std::max(x, y)));
                             r.stratum = stratum;
-                            check(r);
+                            check(r, nullptr);
                         } else {
                             Region r = sampleRegion(rng, o, x, x, resolution, chromLength(x),
                                                     chromLength(x), band);
                             r.stratum = stratum;
-                            check(r);
+                            check(r, nullptr);
                         }
                     }
                 }
@@ -860,12 +1023,15 @@ int compareMain(int argc, char *argv[]) {
                 const std::string &x = commonChroms[i], &y = commonChroms[j];
                 ++s.matrices;
                 check(sampleRegion(rng, o, x, y, resolution, chromLength(x), chromLength(y),
-                                   optionBand(o)));
+                                   optionBand(o)), nullptr);
             }
         }
 
         const bool sweeping = o.randomRegions || o.stratified;
+        using ChromosomePair = std::pair<std::string, std::string>;
+        std::map<ChromosomePair, AnchorSample> guides;
         for (int32_t resolution : resolutions) {
+            std::map<ChromosomePair, AnchorSample> nextGuides;
             bool exhaustive = o.exhaustiveAll || resolution >= o.exhaustiveAt || resolution == coarsest;
             if (o.skipVectors && sweeping) continue;
             std::cout << "  " << bench.resolutionLabel(resolution) << ": "
@@ -875,27 +1041,58 @@ int compareMain(int argc, char *argv[]) {
                 for (size_t i = 0; i < commonChroms.size(); ++i) {
                     for (size_t j = i; j < commonChroms.size(); ++j) {
                         const std::string &x = commonChroms[i], &y = commonChroms[j];
+                        ChromosomePair pair(x, y);
                         uint64_t xlen = chromLength(x), ylen = chromLength(y);
                         ++s.matrices;
+                        size_t anchorLimit = std::max<size_t>(16, o.samples * 4);
+                        uint64_t anchorSeed = o.seed ^ uint64_t(resolution) ^
+                            std::hash<std::string>{}(x + '\0' + y + " anchors");
+                        AnchorSample &captured = nextGuides.emplace(
+                            pair, AnchorSample(resolution, anchorLimit, anchorSeed)).first->second;
                         if (exhaustive) {
                             Region r;
                             r.chr1 = x; r.chr2 = y; r.resolution = resolution;
                             r.x0 = 0; r.x1 = xlen; r.y0 = 0; r.y1 = ylen;
                             r.widthBins = (xlen + uint64_t(resolution) - 1) / uint64_t(resolution);
                             r.distance = x == y ? 0 : -1;
-                            check(r);
+                            check(r, &captured);
                         } else {
                             // '\0' as a char: "\0" is a zero-length C string, so the
                             // separator vanished and ("chr1","chr23") hashed the
                             // same as ("chr12","chr3").
                             std::mt19937_64 rng(o.seed ^ uint64_t(resolution) ^
                                 std::hash<std::string>{}(x + '\0' + y));
-                            for (size_t k = 0; k < o.samples; ++k)
-                                check(sampleRegion(rng, o, x, y, resolution, xlen, ylen,
-                                                   optionBand(o)));
+                            auto guide = guides.find(pair);
+                            for (size_t k = 0; k < o.samples; ++k) {
+                                Region r;
+                                // Preserve half the ordinary random probes: a
+                                // coarse aggregate can remain equal even when
+                                // fine contacts move within that coarse bin.
+                                bool guided = !o.varyDistance && k % 2 == 0 &&
+                                    guide != guides.end() && !guide->second.cells.empty();
+                                if (guided) {
+                                    const AnchorSample &sample = guide->second;
+                                    const Cell &anchor = sample.cells[rng() % sample.cells.size()];
+                                    r = sampleGuidedRegion(rng, o, x, y, resolution, xlen, ylen,
+                                                           anchor, sample.resolution);
+                                    ++s.guidedWindows;
+                                } else {
+                                    r = sampleRegion(rng, o, x, y, resolution, xlen, ylen,
+                                                     optionBand(o));
+                                }
+                                check(r, &captured);
+                            }
                         }
                     }
                 }
+                // If this resolution's probes found nothing, retain the most
+                // recent occupied coarser anchors rather than losing guidance.
+                for (const auto &entry : guides) {
+                    auto fresh = nextGuides.find(entry.first);
+                    if (fresh == nextGuides.end() || fresh->second.cells.empty())
+                        nextGuides[entry.first] = entry.second;
+                }
+                guides = std::move(nextGuides);
             }
             if (o.skipVectors) continue;
             for (const auto &chr : commonChroms) {
@@ -912,6 +1109,7 @@ int compareMain(int argc, char *argv[]) {
                     (canonicalChroms.at(chr).length % uint64_t(resolution) != 0);
                 auto fetch = [&](int which, const std::string &kind, const std::string &norm,
                                  std::vector<double> &out) {
+                    out.clear();
                     const std::string &path = which ? o.second : o.first;
                     auto start = Clock::now();
                     bool ok = kind == "normalization"
@@ -924,25 +1122,44 @@ int compareMain(int argc, char *argv[]) {
                 bool aa = fetch(0, "expected", "NONE", a);
                 bool bb = fetch(1, "expected", "NONE", b);
                 if (aa != bb) difference(s, o, "expected NONE availability differs for " + chr + " @" + std::to_string(resolution));
+                else if (!aa) ++s.skippedVectors;
                 else if (aa) compareVector("expected", chr, resolution, "NONE", a, b, exhaustive,
                                            firstV10, secondV10, expectedLength, o, s);
                 for (const auto &norm : o.norms) {
                     aa = fetch(0, "normalization", norm, a);
                     bb = fetch(1, "normalization", norm, b);
                     if (aa != bb) difference(s, o, "normalization " + norm + " availability differs for " + chr + " @" + std::to_string(resolution));
-                    else if (aa) compareVector("normalization", chr, resolution, norm, a, b, exhaustive,
+                    else if (!aa) ++s.skippedVectors;
+                    // The APIs have already materialized the whole vector, so
+                    // comparing every value is both stronger and scarcely more
+                    // expensive than sampling it.
+                    else if (aa) compareVector("normalization", chr, resolution, norm, a, b, true,
                                                firstV10, secondV10, normalizationLength, o, s);
                     aa = fetch(0, "expected", norm, a);
                     bb = fetch(1, "expected", norm, b);
                     if (aa != bb) difference(s, o, "normalized expected " + norm + " availability differs for " + chr + " @" + std::to_string(resolution));
+                    else if (!aa) ++s.skippedVectors;
                     else if (aa) compareVector("expected", chr, resolution, norm, a, b, exhaustive,
                                                firstV10, secondV10, expectedLength, o, s);
                 }
             }
         }
-        std::cout << "Checked " << s.matrices << " chromosome-pair/resolution matrices, " << s.windows
-                  << " regions, " << s.cells << " nonzero-cell union entries, " << s.vectors
-                  << " vectors, and " << s.vectorValues << " vector values.\n";
+        std::cout << "Considered " << s.matrices << " chromosome-pair/resolution matrices and checked "
+                  << s.windows << " regions (" << s.contactRecords << " raw contact records streamed, "
+                  << s.residualCells << " non-cancelling cells), " << s.vectors << " vectors, and "
+                  << s.vectorValues << " vector values.\n";
+        if (s.guidedWindows)
+            std::cout << "NOTE: " << s.guidedWindows
+                      << " sampled regions were guided by occupied coarser-resolution bins.\n";
+        if (s.skippedMatrices)
+            std::cout << "NOTE: skipped " << s.skippedMatrices
+                      << " matrices unavailable in both files.\n";
+        if (s.skippedVectors)
+            std::cout << "NOTE: skipped " << s.skippedVectors
+                      << " vectors unavailable in both files.\n";
+        if (s.absoluteRawDelta != 0)
+            std::cout << "Raw sum(abs(A-B)): " << std::setprecision(17)
+                      << static_cast<double>(s.absoluteRawDelta) << '\n';
         bench.wall = since(started);
         if (o.timing) report(bench, o);
         if (s.differences) {

@@ -898,6 +898,15 @@ std::vector<int32_t> File::derivedResolutions(const std::string &unit) const {
 std::string File::genome() const { return impl->h.genome; }
 std::vector<std::string> File::normalizations() const { return impl->h.norms; }
 std::vector<std::pair<std::string, std::string>> File::attributes() const { return impl->h.attributes; }
+bool File::hasMatrix(const std::string &chr1, const std::string &chr2,
+                     const std::string &unit, int32_t resolution) {
+    auto &p = *impl;
+    uint32_t a = p.chromosomeId(chr1), b = p.chromosomeId(chr2);
+    if (a > b) std::swap(a, b);
+    uint8_t u = unitId(unit);
+    uint32_t ri = p.resolutionId(u, resolution);
+    return p.zoom({a, b}, u, ri) != nullptr;
+}
 void File::raw(const std::string &chr1, const std::string &chr2, const std::string &unit,
                int32_t resolution, uint64_t x0, uint64_t x1, uint64_t y0, uint64_t y1,
                const Callback &cb) {

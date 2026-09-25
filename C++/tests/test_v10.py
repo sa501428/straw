@@ -150,6 +150,15 @@ def run(command, ok=True):
     assert (p.returncode == 0) == ok, (command, p.returncode, p.stdout, p.stderr)
     return p.stdout
 
+def remove_matrix_directory(path):
+    """Keep vectors/metadata intact but advertise no chromosome-pair matrices."""
+    data = bytearray(path.read_bytes())
+    footer = struct.unpack_from('<Q', data, 16)[0]
+    struct.pack_into('<Q', data, 24, 24)          # header footer length
+    struct.pack_into('<Q', data, footer + 8, 24) # footer self length
+    struct.pack_into('<I', data, footer + 16, 0) # matrix count
+    path.write_bytes(data)
+
 def main():
     straw, probe = sys.argv[1:3]
     with tempfile.TemporaryDirectory() as d:
@@ -165,9 +174,20 @@ def main():
             ok=False)
         assert 'RESULT: IDENTICAL WITHIN TOLERANCE' in run(
             [straw, 'compare', path, path, '--all'])
+        output = run([straw, 'compare', path, path])
+        assert 'sampled regions were guided by occupied coarser-resolution bins' in output, output
+        empty = pathlib.Path(d) / 'empty.hic'
+        fixture(empty)
+        remove_matrix_directory(empty)
+        output = run([straw, 'compare', empty, empty, '--all'])
+        assert 'NOTE: skipped 6 matrices unavailable in both files.' in output, output
+        output = run([straw, 'compare', path, empty, '--all'], ok=False)
+        assert 'NOTE: skipped 4 matrices unavailable in both files.' in output, output
+        assert 'RESULT: DIFFERENT (2 differences)' in output, output
         fixture(other, values=(1, 1, 6))
-        assert 'RESULT: DIFFERENT' in run(
-            [straw, 'compare', path, other, '--all'], ok=False)
+        output = run([straw, 'compare', path, other, '--all'], ok=False)
+        assert 'Raw sum(abs(A-B)): 2' in output, output
+        assert 'RESULT: DIFFERENT' in output, output
         for rep in range(3):
             for mode in ([0, 1, 2] if rep < 2 else [2]):
                 values = (1, 1, 1) if mode == 0 else (1, 1, 5)
