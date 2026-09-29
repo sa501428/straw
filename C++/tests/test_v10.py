@@ -60,7 +60,8 @@ def block(rep=0, mode=2, score=False, values=(1, 1, 5), malformed=None, collisio
     return head + ps + vs
 
 def fixture(path, rep=0, mode=2, score=False, values=(1, 1, 5), malformed=None,
-            transform=0, rotated=True, frag=False, derived=True, collision=False):
+            transform=0, rotated=True, frag=False, derived=True, collision=False,
+            target_materialized=False):
     # All data offsets are computed independently from the normative tables.
     chroms = [('chrA', 80), ('chrB', 70)]
     variable = string('test') + pack('I', 2) + string('duplicate') + string('one') + string('duplicate') + string('two')
@@ -68,7 +69,7 @@ def fixture(path, rep=0, mode=2, score=False, values=(1, 1, 5), malformed=None,
     res = pack('IBBHI', 10, 0, 1, 0, 0xffffffff)
     if derived:
         res += (pack('IBBHI', 20, 0, 1, 0, 0xffffffff)
-                if malformed == 'mandatory-materialized'
+                if target_materialized
                 else pack('IBBHI', 20, 1, 1, 0, 0))
     nr = 2 if derived else 1
     variable += pack('I', nr) + res
@@ -100,11 +101,11 @@ def fixture(path, rep=0, mode=2, score=False, values=(1, 1, 5), malformed=None,
                     0 if is_derived else 0xffffffff,
                     0 if malformed == 'nonrotated-cis' else int(rotated),
                     sum_bits, 1 if is_derived and collision else 3,
-                    0x7fc00000, 0x7fc00000, 4, 1 if is_derived else 2,
+                    0x7fc00000, 0x7fc00000, 4, 1 if ri else 2,
                     0 if is_derived else index_pos, 0 if is_derived else len(idx),
                     0 if is_derived else 1, 0)
     desc = descriptor(0, 0, 10, False)
-    if derived: desc += descriptor(0, 1, 20, True)
+    if derived: desc += descriptor(0, 1, 20, not target_materialized)
     if frag: desc += descriptor(1, 0, 1, False)
     data[matrix_pos + 24:matrix_pos + 24 + len(desc)] = desc
     locators = []
@@ -224,6 +225,8 @@ def main():
         assert run([probe, path, 'raw', 'chrA', 'chrA', 10]) == ''
         fixture(path, collision=True)
         assert run([probe, path, 'raw', 'chrA', 'chrA', 20]).strip() == '0 0 c 7'
+        fixture(path, target_materialized=True)
+        assert len(run([probe, path, 'raw', 'chrA', 'chrA', 20]).splitlines()) == 3
         float_bits = lambda x: struct.unpack('<I', pack('f', x))[0]
         fixture(path, collision=True, score=True, values=tuple(map(float_bits, (1.25, 0.5, 2.75))))
         assert run([probe, path, 'raw', 'chrA', 'chrA', 20]).strip() == f'0 0 s {float_bits(4.5)}'
@@ -236,7 +239,7 @@ def main():
         assert f'c {(1 << 53)+1}' in run([probe, path, 'raw', 'chrA', 'chrA', 10])
         assert f'0\t0\t{(1 << 53)+1}' in run([straw, 'observed', 'NONE', path, 'chrA', 'chrA', 'BP', 10])
         for bad in ['overlong', 'duplicate', 'zero-count', 'overflow-varint', 'concat-frame',
-                    'bad-footer', 'unknown-mode', 'invalid-source', 'mandatory-materialized',
+                    'bad-footer', 'unknown-mode', 'invalid-source',
                     'nonrotated-cis', 'old-index', 'short']:
             fixture(path, malformed=bad)
             run([straw, 'observed', 'NONE', path, 'chrA', 'chrA', 'BP', 10], ok=False)

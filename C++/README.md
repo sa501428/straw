@@ -307,7 +307,7 @@ straw observed VC input.v10.hic chr1 chr1 BP 1000
 straw oe VC input.v10.hic chr1 chr1 BP 1000
 ```
 
-Supported V10 features include materialized and derived resolutions, mandatory
+Supported V10 features include materialized and derived resolutions,
 rotated cis grids, rectangular trans grids, sparse/bitmap/dense blocks, all value modes, integer
 counts and float scores, BP/FRAG metadata, and all three compressed vector
 transforms. Derived matrices aggregate raw source cells before applying the
@@ -315,11 +315,11 @@ transforms. Derived matrices aggregate raw source cells before applying the
 and corrupt records raise errors; a missing chromosome pair is an empty matrix.
 V10 expected/OE queries are defined for cis matrices only.
 
-The reader enforces the fixed high-resolution pyramid: 2 and 5 bp derive from
-1 bp, 20 and 50 bp from 10 bp, 200 and 500 bp from 100 bp, and 2 kb from 1 kb.
-The 500 kb level must be
-materialized. Experimental V10 files that materialized one of those seven virtual
-levels are rejected as nonconforming and must be rebuilt.
+The standard writer pyramid derives 2 and 5 bp from 1 bp, 20 and 50 bp from
+10 bp, 200 and 500 bp from 100 bp, and 2 kb from 1 kb. Files may override those
+defaults, materialize any advertised resolution, or declare another exact
+materialized divisor as a target's source. The reader follows each file's
+declarations and rejects chained derivations or nonintegral source mappings.
 
 V10 region values are accepted as supplied without classifying them as zero-based
 or one-based. The current `start:end` API uses `end` as an exclusive numeric
