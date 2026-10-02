@@ -2306,9 +2306,14 @@ vector<string> getNormalizationsForFile(const string &fileName) {
         if (find(values.begin(), values.end(), "NONE") == values.end()) values.push_back("NONE");
         return values;
     }
-    // Legacy normalization indexes are resolution-specific and are queried by
-    // name. NONE is the only normalization guaranteed to exist in every file.
-    return {"NONE"};
+    vector<string> values{"NONE"};
+    if (HiCFile(fileName).version == 9) {
+        StrawNormalizationVectors vectors(fileName);
+        for (const auto &entry : vectors.entries())
+            if (find(values.begin(), values.end(), entry.normalization) == values.end())
+                values.push_back(entry.normalization);
+    }
+    return values;
 }
 
 vector<pair<string, string>> getAttributesForFile(const string &fileName) {
@@ -2339,9 +2344,7 @@ StrawFileInfo getFileInfo(const string &fileName) {
     info.chromosomes = file.getChromosomes();
     info.bpResolutions = file.resolutions;
     info.fragResolutions = file.fragResolutions;
-    // Legacy normalization indexes are resolution-specific and are queried by
-    // name; NONE is the only one guaranteed to exist in every file.
-    info.normalizations = {"NONE"};
+    info.normalizations = getNormalizationsForFile(fileName);
     info.attributes = file.attributes;
     return info;
 }

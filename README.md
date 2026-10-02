@@ -13,7 +13,7 @@ implementation is archived at https://github.com/aidenlab/pystraw.
 
 | Flavor | Implementation and primary surface |
 |---|---|
-| C++ | Native CLI/library; sparse/dense queries, metadata, vectors, exact V10 raw data, compare, subsample, Slice and HBS |
+| C++ | Native CLI/library; sparse/dense queries, metadata, vectors, exact V10 raw data, compare, subsample, norm export, Slice and HBS |
 | C (`libstraw`) | Stable shared-library ABI; owned results, typed status/errors, metadata, sparse/dense/raw/vector queries, retained prepared queries |
 | Python / R | In-process C++ bindings for query and metadata workflows |
 | Julia / .NET / Ruby / Perl / MATLAB | Thin bindings over release-built `libstraw`; see each directory README for its exposed subset |
@@ -46,6 +46,18 @@ Clone the library and `cd` into the `straw/` directory. Then `pip install ./pybi
 cmake -S C++ -B C++/build -DCMAKE_BUILD_TYPE=Release
 cmake --build C++/build --parallel
 ```
+
+To transfer custom normalization divisors from v9 into an already-built v10 file:
+
+```sh
+C++/build/straw dump-norms source.v9.hic --output-dir norms
+hic_v10 addnorm --norm-file norms/RU.norm.txt destination.v10.hic
+# hic_v10_large accepts the same --norm-file input.
+```
+
+Each file contains all stored resolutions/chromosomes for its normalization
+name. See [the normalization export documentation](C++/README.md#export-normalization-vectors-for-v10-addnorm)
+for selection, exact float bits, and v9 terminal-bin migration.
 
 Development headers for cURL, zlib, and zstd are required.
 Please see [the wiki](https://github.com/aidenlab/straw/wiki) for more documentation.

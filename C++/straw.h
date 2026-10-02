@@ -176,12 +176,13 @@ std::string getGenomeForFile(const std::string& fileName);
 
 int32_t getVersionForFile(const std::string& fileName);
 
+// V9 enumerates indexed types; V10 returns its type dictionary. NONE is included.
 std::vector<std::string> getNormalizationsForFile(const std::string& fileName);
 
 std::vector<std::pair<std::string, std::string>> getAttributesForFile(
     const std::string& fileName);
 
-// Everything the per-file accessors above return, gathered from a single open.
+// Everything the per-file accessors above return, gathered into one result.
 // Calling them individually costs two file opens each (an isV10 probe plus a
 // reader), which over HTTP is two round trips per property.
 struct StrawFileInfo {

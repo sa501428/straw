@@ -1,5 +1,6 @@
 #include "straw_v10.h"
 #include "v10_binary.h"
+#include "file_source.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -15,111 +16,7 @@
 
 namespace straw_v10 {
 namespace {
-struct Source {
-    std::ifstream file;
-    CURL *curl = nullptr;
-    uint64_t size = 0, requested = 0, responseStart = UINT64_MAX, responseEnd = 0;
-    Bytes response;
-    static size_t write(char *p, size_t a, size_t b, void *context) {
-        auto &s = *static_cast<Source *>(context);
-        if (b && a > SIZE_MAX / b)
-            return 0;
-        size_t n = a * b;
-        if (n > s.requested - s.response.size())
-            return 0;
-        try {
-            s.response.insert(s.response.end(), p, p + n);
-        } catch (...) {
-            return 0;
-        }
-        return n;
-    }
-    static size_t header(char *p, size_t a, size_t b, void *context) {
-        auto &s = *static_cast<Source *>(context);
-        size_t n = a * b;
-        try {
-            std::string line(p, n), lower = line;
-            std::transform(lower.begin(), lower.end(), lower.begin(),
-                           [](unsigned char c) { return std::tolower(c); });
-            if (lower.compare(0, 14, "content-range:") == 0) {
-                unsigned long long first, last, total;
-                if (std::sscanf(lower.c_str(), "content-range: bytes %llu-%llu/%llu", &first, &last,
-                                &total) == 3) {
-                    s.responseStart = first;
-                    s.responseEnd = last;
-                    s.size = total;
-                }
-            }
-        } catch (...) {
-            return 0;
-        }
-        return n;
-    }
-    explicit Source(const std::string &path) {
-        if (path.compare(0, 7, "http://") == 0 || path.compare(0, 8, "https://") == 0) {
-            static std::once_flag once;
-            std::call_once(once, [] {
-                require(curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK,
-                        "curl initialization failed");
-            });
-            curl = curl_easy_init();
-            require(curl != nullptr, "curl initialization failed");
-            curl_easy_setopt(curl, CURLOPT_URL, path.c_str());
-            curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-            curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 10L);
-            curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
-            curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
-            curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
-            curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);
-            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write);
-            curl_easy_setopt(curl, CURLOPT_WRITEDATA, this);
-            curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header);
-            curl_easy_setopt(curl, CURLOPT_HEADERDATA, this);
-            curl_easy_setopt(curl, CURLOPT_USERAGENT, "straw-v10");
-        } else {
-            file.open(path, std::ios::binary);
-            require(bool(file), "cannot open " + path);
-            file.seekg(0, std::ios::end);
-            auto end = file.tellg();
-            require(end >= 0, "cannot stat input");
-            size = uint64_t(end);
-        }
-    }
-    ~Source() {
-        if (curl)
-            curl_easy_cleanup(curl);
-    }
-    void interval(uint64_t pos, uint64_t len) const {
-        require(len > 0 && pos <= size && len <= size - pos, "file interval out of bounds");
-    }
-    Bytes read(uint64_t pos, uint64_t len) {
-        require(len > 0 && len <= allocationLimit, "record exceeds allocation limit");
-        if (size)
-            interval(pos, len);
-        if (!curl) {
-            Bytes out(static_cast<size_t>(len));
-            file.clear();
-            file.seekg(static_cast<std::streamoff>(pos));
-            file.read(reinterpret_cast<char *>(out.data()), static_cast<std::streamsize>(len));
-            require(bool(file), "short file read");
-            return out;
-        }
-        requested = len;
-        response.clear();
-        responseStart = UINT64_MAX;
-        std::string range = std::to_string(pos) + "-" + std::to_string(add(pos, len) - 1);
-        curl_easy_setopt(curl, CURLOPT_RANGE, range.c_str());
-        CURLcode rc = curl_easy_perform(curl);
-        long status = 0;
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
-        require(rc == CURLE_OK, std::string("HTTP range read failed: ") + curl_easy_strerror(rc));
-        require(status == 206 && responseStart == pos && responseEnd == pos + len - 1 &&
-                    response.size() == len,
-                "server must return the exact requested HTTP byte range (206)");
-        interval(pos, len);
-        return std::move(response);
-    }
-};
+using straw_file::Source;
 struct Locator {
     uint64_t pos = 0, len = 0;
 };
@@ -335,6 +232,7 @@ struct File::Impl {
     Source source;
     std::unique_ptr<ZSTD_DCtx, size_t (*)(ZSTD_DCtx *)> decoder;
     Header h;
+    Bytes normIndex;
     std::map<Pair, Locator> matrices;
     std::map<Pair, std::vector<Zoom>> zoomCache;
     // Block indexes are re-read and re-validated on every query otherwise, which
@@ -708,11 +606,16 @@ struct File::Impl {
                       static_cast<float>(e.second.score), z->type != 0});
     }
     std::vector<double> vector(uint8_t kind, uint32_t norm, uint32_t chr, uint8_t unit, uint32_t ri,
-                               double &scale, uint64_t begin = 0, uint64_t end = UINT64_MAX) {
+                               double &scale, uint64_t begin = 0, uint64_t end = UINT64_MAX,
+                               const std::function<void(uint32_t)> &consume = {},
+                               std::vector<StrawNormalizationVector> *listing = nullptr) {
         Locator loc = kind == 0 ? h.norm : kind == 1 ? h.expected : h.normExpected;
+        if (listing && !loc.len) return {};
         require(loc.len, "requested normalization/expected capability is absent");
-        auto bytes = source.read(loc.pos, loc.len);
-        Cursor c(bytes);
+        Bytes bytes;
+        if (kind == 0 && normIndex.empty()) normIndex = source.read(loc.pos, loc.len);
+        if (kind != 0) bytes = source.read(loc.pos, loc.len);
+        Cursor c(kind == 0 ? normIndex : bytes);
         c.magic(kind == 0 ? "NVI0" : kind == 1 ? "EVI0" : "NEVI");
         require(c.word() == 1, "unknown vector index version");
         uint32_t n = c.word();
@@ -744,7 +647,14 @@ struct File::Impl {
                     required = std::max(required, h.bins(ch, u, r));
             require(count == required && (!count || (nominal && chunks)) && (count || !chunks),
                     "invalid vector length/chunks");
-            bool match =
+            if (listing) {
+                StrawNormalizationVector entry;
+                entry.normalization = h.norms[ni]; entry.chromosome = h.chroms[ci].name;
+                entry.unit = u ? "FRAG" : "BP"; entry.resolution = bin;
+                entry.count = count; entry.binCount = required;
+                listing->push_back(std::move(entry));
+            }
+            bool match = !listing &&
                 u == unit && r == ri && (kind == 1 || ni == norm) && (kind != 0 || ci == chr);
             double factor = 1;
             if (kind) {
@@ -764,9 +674,9 @@ struct File::Impl {
             uint64_t next = 0;
             if (match) {
                 end = std::min(end, count);
-                require(begin <= end && end - begin <= allocationLimit / sizeof(double),
+                require(begin <= end && (consume || end - begin <= allocationLimit / sizeof(double)),
                         "vector range exceeds allocation limit");
-                result.reserve(end - begin);
+                if (!consume) result.reserve(end - begin);
                 found = true;
                 scale = factor;
             }
@@ -806,15 +716,17 @@ struct File::Impl {
                             bits ^= prevBits;
                     }
                     prevBits = bits;
-                    if (first + k >= begin && first + k < end)
-                        result.push_back(asFloat(bits));
+                    if (first + k >= begin && first + k < end) {
+                        if (consume) consume(bits);
+                        else result.push_back(asFloat(bits));
+                    }
                 }
             }
             require(next == count, "incomplete vector coverage");
             e.done();
         }
         c.done();
-        require(found, "requested normalization/expected capability is absent");
+        require(found || listing, "requested normalization/expected capability is absent");
         return result;
     }
     uint32_t normId(const std::string &norm) const {
@@ -940,6 +852,21 @@ std::vector<double> File::normalization(const std::string &chr, const std::strin
     }
     double scale = 1;
     return p.vector(0, p.normId(norm), ch, u, ri, scale);
+}
+std::vector<StrawNormalizationVector> File::normalizationEntries() {
+    std::vector<StrawNormalizationVector> result;
+    double scale = 1;
+    impl->vector(0, 0, 0, 0, 0, scale, 0, UINT64_MAX, {}, &result);
+    return result;
+}
+void File::streamNormalization(const StrawNormalizationVector &entry,
+                               const std::function<void(uint32_t)> &consume) {
+    require(bool(consume), "normalization consumer is required");
+    auto &p = *impl;
+    auto u = unitId(entry.unit);
+    double scale = 1;
+    p.vector(0, p.normId(entry.normalization), p.chromosomeId(entry.chromosome), u,
+             p.resolutionId(u, entry.resolution), scale, 0, UINT64_MAX, consume);
 }
 std::vector<double> File::expected(const std::string &chr, const std::string &unit,
                                    int32_t resolution, const std::string &norm) {

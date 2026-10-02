@@ -7,6 +7,10 @@ int main(int argc, char **argv) {
         if (argc < 3)
             return 2;
         std::string path = argv[1], mode = argv[2];
+        if (mode == "norm-names") {
+            for (const auto &name : getNormalizationsForFile(path)) std::cout << name << '\n';
+            return 0;
+        }
         straw_v10::File file(path);
         if (mode == "raw") {
             auto cb = [](const straw_v10::Record &r) {

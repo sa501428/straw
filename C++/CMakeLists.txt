@@ -17,7 +17,7 @@ else()
   set(STRAW_ZSTD_TARGET PkgConfig::ZSTD)
 endif()
 
-add_library(straw_core STATIC straw.cpp straw_v10.cpp hbs.cpp)
+add_library(straw_core STATIC straw.cpp straw_v10.cpp hbs.cpp norm_vectors.cpp)
 set_target_properties(straw_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(straw_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
@@ -25,7 +25,7 @@ target_include_directories(straw_core PUBLIC
 target_link_libraries(straw_core PUBLIC
   CURL::libcurl ZLIB::ZLIB Threads::Threads ${STRAW_ZSTD_TARGET})
 
-add_executable(straw_cli main.cpp subsample.cpp compare.cpp)
+add_executable(straw_cli main.cpp subsample.cpp compare.cpp norm_dump.cpp)
 set_target_properties(straw_cli PROPERTIES OUTPUT_NAME straw)
 target_link_libraries(straw_cli PRIVATE straw_core)
 
@@ -45,6 +45,9 @@ if(BUILD_TESTING)
     add_test(NAME v10_reader_conformance
       COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_v10.py
               $<TARGET_FILE:straw_cli> $<TARGET_FILE:v10_api_probe>)
+    add_test(NAME normalization_dump
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_norm_dump.py
+              $<TARGET_FILE:straw_cli> $<TARGET_FILE:v10_api_probe>)
     add_test(NAME subsample_short
       COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_subsample.py
               $<TARGET_FILE:straw_cli>)
@@ -56,6 +59,9 @@ endif()
 
 option(STRAW_TEST_HTTP "Run tests requiring a loopback HTTP server" OFF)
 if(BUILD_TESTING AND Python3_Interpreter_FOUND AND STRAW_TEST_HTTP)
+  add_test(NAME normalization_http_ranges
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_norm_dump.py
+            $<TARGET_FILE:straw_cli> $<TARGET_FILE:v10_api_probe> --http)
   add_test(NAME v10_http_ranges
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_v10.py
             $<TARGET_FILE:straw_cli> $<TARGET_FILE:v10_api_probe> --http)

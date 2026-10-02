@@ -232,6 +232,74 @@ trips through both hictools-c builders:
 python3 tests/test_subsample.py build/straw /path/to/hic_pre /path/to/hic_v10
 ```
 
+## Export normalization vectors for v10 addnorm
+
+The C++ CLI exports **v9 and v10** stored normalization vectors in the
+`HIC_NORM_VECTORS 1` format accepted by both hictools-c v10 addnorm executables:
+
+```sh
+# One file per stored type, containing every indexed chromosome/resolution:
+build/straw dump-norms source.v9.hic --output-dir norms
+# Select custom types, with no built-in-name whitelist:
+build/straw dump-norms source.v9.hic --norm RU --norm NDSCALE --output-dir selected
+# Select exactly one type and choose its output filename:
+build/straw dump-norms source.v9.hic --norm RU --output RU.norm.txt
+
+hic_v10 addnorm --norm-file RU.norm.txt destination.v10.hic
+for vectors in norms/*.norm.txt; do
+  hic_v10_large addnorm --norm-file "$vectors" --tmp /local/scratch destination.v10.hic
+done
+```
+
+The default includes every indexed type, including custom names. Files are
+named `<TYPE>.norm.txt`; punctuation and other unsafe filename bytes are
+percent-encoded, and case-only collisions receive numeric prefixes. The
+command prints the type-to-path mapping to stderr. `--norm` is repeatable and
+case-sensitive. `NONE` is synthetic and is not exported; overview chromosome
+vectors are also omitted. Each file includes all available BP/FRAG entries
+for that type. Missing chromosome/resolution entries are not invented. No cis
+matrix or expected array is needed to read stored divisors. Duplicate v9 index
+keys use the last entry, consistent with the legacy reader.
+
+Output uses exact float32 `bits:XXXXXXXX` values, preserving signed zero and
+NaN payloads, without rescaling. Names are quoted and escaped. For example:
+
+```text
+HIC_NORM_VECTORS 1
+vector "RU" "chr1" BP 10000
+bits:3f800001
+bits:40000000
+bits:7fc01234
+end
+```
+
+V9 often has an extra terminal bin, or a vector shorter than the v10 bin count.
+In that case the exporter includes `source-length N` after the `vector` line
+and writes **all N original values**. The importer uses the destination's
+ceiling bin count: matching bins keep exact bits, missing bins become NaNs,
+and surplus values and the original count are retained in header attributes
+`hictools.import.vector.0.<normId>.<chrId>.<unitId>.<resolutionId>`, with value
+`N:` plus eight hexadecimal digits per surplus word. No source words are lost.
+The target must have matching chromosome names and the advertised resolutions
+and units. Use the updated hictools-c importer for `source-length` files.
+
+Addnorm recomputes normalized expected arrays and chromosome scale factors from
+the **destination raw contacts** and these divisors. It preserves existing
+normalization bundles and raw contact blocks; source expected arrays and scale
+factors are not transferred by this export.
+
+Local files and HTTP(S) URLs with exact byte-range support are accepted. Vector
+values are streamed in bounded chunks rather than holding all chromosomes in
+memory. Named outputs are staged and checked before publication; existing
+files are never overwritten. Ordinary failures remove temporary outputs.
+`--output` requires a single `--norm`; `--output-dir` creates directories as
+needed. An input with no exportable vectors or an unknown selected type is an
+error. Earlier .hic versions are not supported by this command.
+
+The C++ `StrawNormalizationVectors` interface in `norm_vectors.h` exposes
+indexed metadata and exact streamed float32 words. Legacy v9 metadata APIs now
+enumerate actual custom norm names instead of advertising only `NONE`.
+
 ## Compressed binary short output (.hbs.gz)
 
 Both `subsample` and `dump` can write HBS, a compact binary alternative to

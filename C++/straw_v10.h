@@ -1,6 +1,7 @@
 #pragma once
 
 #include "straw.h"
+#include "norm_vectors.h"
 #include <memory>
 
 // The V10 wire format is independent of V6-V9. Keep its parser and query path
@@ -32,6 +33,9 @@ class File {
     std::string genome() const;
     std::vector<std::string> normalizations() const;
     std::vector<std::pair<std::string, std::string>> attributes() const;
+    std::vector<StrawNormalizationVector> normalizationEntries();
+    void streamNormalization(const StrawNormalizationVector &entry,
+                             const std::function<void(uint32_t)> &consume);
     // True when the chromosome pair has a matrix descriptor at this unit and
     // resolution. An existing, legitimately empty matrix still returns true.
     bool hasMatrix(const std::string &chr1, const std::string &chr2,
