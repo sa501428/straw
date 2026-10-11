@@ -32,6 +32,13 @@ parsed native reader plus prepared matrix/zoom state; repeated `window` and
 `regions` calls do not reconstruct the reader or footer state, and the query
 remains valid if its original `straw_file_t` is closed.
 
+V10 trans `oe` and `expected` queries use the raw whole-matrix mean
+`(sumCountsOrScores / nBins1) / nBins2`, as in V9, with V10's target-resolution
+BP/FRAG bin counts. Normalization applies to the numerator only; query windows
+do not change the denominator, and no cis expected vectors are required. All
+language adapters linked to this shared library inherit this behavior after
+rebuilding the library; the ABI is unchanged.
+
 Failures are classified from typed native exceptions, never by matching error
 message text. Callers receive a stable `straw_status_t` and optional owned
 `straw_error_t`.

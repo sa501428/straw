@@ -11,6 +11,13 @@ Straw is a fast implementation of reading/dump for .hic files
 The R flavor exposes `.hic` metadata and sparse contact queries. It does not
 create Slice or HBS files; those outputs are C++-only.
 
+V10 trans `oe` and `expected` queries use the raw whole-matrix mean
+`(sumCountsOrScores / nBins1) / nBins2`, as in V9, without requiring cis expected
+vectors. Normalization applies to the numerator only. V10 uses its own BP/FRAG
+bin geometry and target-resolution descriptor, including for derived matrices.
+The R package compiles the shared C++ V10 reader, so rebuild/reinstall the
+package to pick up this behavior.
+
 ## Installation
 ```R
 remotes::install_github("aidenlab/straw/R")

@@ -12,6 +12,14 @@ exclusive numeric boundary.
 Slice and HBS creation are intentionally C++-only and are not exposed by the
 Python module.
 
+V10 trans `oe` and `expected` queries use the raw whole-matrix mean
+`(sumCountsOrScores / nBins1) / nBins2`, as in V9, without requiring cis expected
+vectors. Normalization applies to the numerator only. V10 bin geometry includes
+partial BP bins and uses fragment counts for FRAG; derived queries use their
+target descriptor. Query windows do not change the mean. Rebuild the extension
+to pick up changes in the shared C++ reader. After building in place, run
+`python tests/test_trans_v10.py` to check both direct and prepared queries.
+
 Once you've installed the library with `pip install hic-straw`, you can import your code with `import hicstraw`. 
 
 ## New usage to directly get numpy matrix

@@ -49,7 +49,7 @@ class GetPybindInclude(object):
 ext_modules = [
     Extension(
         'hicstraw',
-        ['src/straw.cpp', 'src/straw_v10.cpp'],
+        ['src/straw.cpp', 'src/straw_v10.cpp', 'src/norm_vectors.cpp'],
         include_dirs=[
             # Path to pybind11 headers
             GetPybindInclude(),

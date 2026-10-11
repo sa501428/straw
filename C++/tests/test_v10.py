@@ -61,7 +61,7 @@ def block(rep=0, mode=2, score=False, values=(1, 1, 5), malformed=None, collisio
 
 def fixture(path, rep=0, mode=2, score=False, values=(1, 1, 5), malformed=None,
             transform=0, rotated=True, frag=False, derived=True, collision=False,
-            target_materialized=False):
+            target_materialized=False, trans=False):
     # All data offsets are computed independently from the normative tables.
     chroms = [('chrA', 80), ('chrB', 70)]
     variable = string('test') + pack('I', 2) + string('duplicate') + string('one') + string('duplicate') + string('two')
@@ -81,7 +81,7 @@ def fixture(path, rep=0, mode=2, score=False, values=(1, 1, 5), malformed=None,
     data = bytearray(88) + variable
     ndesc = nr + int(frag)
     matrix_pos = len(data)
-    data += b'H10M' + pack('5I', 1, 0, 0, ndesc, 0) + bytes(76 * ndesc)
+    data += b'H10M' + pack('5I', 1, 0, int(trans), ndesc, 0) + bytes(76 * ndesc)
     logical = block(rep, mode, score, values, malformed, collision)
     frame = compress(logical)
     if malformed == 'concat-frame': frame += compress(b'extra')
@@ -99,7 +99,7 @@ def fixture(path, rep=0, mode=2, score=False, values=(1, 1, 5), malformed=None,
     def descriptor(unit, ri, bin_size, is_derived):
         return pack('4B3IB3xQQII2IQQ2I', unit, int(is_derived), 1, int(score), ri, bin_size,
                     0 if is_derived else 0xffffffff,
-                    0 if malformed == 'nonrotated-cis' else int(rotated),
+                    0 if trans or malformed == 'nonrotated-cis' else int(rotated),
                     sum_bits, 1 if is_derived and collision else 3,
                     0x7fc00000, 0x7fc00000, 4, 1 if ri else 2,
                     0 if is_derived else index_pos, 0 if is_derived else len(idx),
@@ -131,13 +131,27 @@ def fixture(path, rep=0, mode=2, score=False, values=(1, 1, 5), malformed=None,
                 entry += pack('B3xIIQIIII', 0, ri, 10*(ri+1), count, 65536, 1, 1, 0)
                 entry += pack('If', 0, 2.0) + chunks
             entries.append(entry)
+            if kind == 0 and trans:
+                # chrB has 7 source bins and 4 target bins; independent norm=3/6.
+                count = 7 if ri == 0 else 4
+                raw = pack('f', 3.0 if ri == 0 else 6.0) * count
+                chunk = b'H10V' + pack('BBHII', 1, 0, 0, count*4, count) + compress(raw)
+                pos = len(data)
+                data += chunk
+                chunks = pack('QIBBHQII', 0, count, 0, 1, 0, pos, len(chunk), count*4)
+                entries.append(pack('IIIB3xIIQII', 72, 0, 1, 0, ri, 10*(ri+1), count, 65536, 1) + chunks)
+        if kind == 0:
+            entries.sort(key=lambda e: (struct.unpack_from('<I', e, 8)[0], e[12], struct.unpack_from('<I', e, 16)[0]))
         index = [b'NVI0', b'EVI0', b'NEVI'][kind] + pack('III', 1, len(entries), 0) + b''.join(entries)
         locators += [len(data), len(index)]
         data += index
     footer_pos = len(data)
-    footer = b'H10F' + pack('IQII', 1, 48, 1, 0) + pack('IIQQ', 0, 0, matrix_pos, 24+76*ndesc)
+    footer = b'H10F' + pack('IQII', 1, 48, 1, 0) + pack('IIQQ', 0, int(trans), matrix_pos, 24+76*ndesc)
     data += footer
     data[:88] = b'HIC\0' + pack('I10Q', 10, 88+len(variable), footer_pos, len(footer), *locators, 0)
+    if trans:
+        # Trans O/E must work with no cis expected-vector indexes advertised.
+        struct.pack_into('<4Q', data, 48, 0, 0, 0, 0)
     if malformed == 'bad-footer': struct.pack_into('<Q', data, 16, len(data)+10)
     if malformed == 'unknown-mode': data[matrix_pos+25] = 7
     if malformed == 'invalid-source': struct.pack_into('<I', data, matrix_pos+24+76+12, 1)
@@ -165,6 +179,29 @@ def main():
     with tempfile.TemporaryDirectory() as d:
         path = pathlib.Path(d) / 'test.hic'
         other = pathlib.Path(d) / 'other.hic'
+        fixture(path)
+        for score in (False, True):
+            vals = (1, 1, 5) if not score else tuple(struct.unpack('<I', pack('f', x))[0] for x in (1, 1, 5))
+            fixture(path, trans=True, score=score, values=vals, frag=True)
+            rows = run([straw, 'oe', 'NONE', path, 'chrB', 'chrA', 'FRAG', 1]).splitlines()
+            assert len(rows) == 3 and abs(float(rows[0].split()[2])-64/7) < 1e-4, rows
+            for resolution, mean, norm_product in ((10, 7/56, 6), (20, 7/16, 24)):
+                for norm in ('NONE', 'VC'):
+                    for mt in ('oe', 'expected'):
+                        for a, b in (('chrA', 'chrB'), ('chrB', 'chrA')):
+                            rows = [row.split() for row in run([straw, mt, norm, path, a, b, 'BP', resolution]).splitlines()]
+                            expected = [1/mean, 1/mean, 5/mean] if mt == 'oe' else [mean]*3
+                            if mt == 'oe' and norm == 'VC': expected = [v/norm_product for v in expected]
+                            assert len(rows) == 3, rows
+                            assert all(abs(float(row[2])-v) < 1e-4 for row, v in zip(rows, expected)), rows
+                # A window's denominator still uses the entire chromosome pair.
+                row = run([straw, 'oe', 'NONE', path, 'chrB:0:10', 'chrA:0:10', 'BP', resolution]).split()
+                assert abs(float(row[2])-1/mean) < 1e-4, row
+        for scores in ((1, -1, 0), (1, float('inf'), 5), (1, float('nan'), 5)):
+            words = tuple(struct.unpack('<I', pack('f', v))[0] for v in scores)
+            fixture(path, trans=True, score=True, values=words)
+            assert run([straw, 'oe', 'NONE', path, 'chrA', 'chrB', 'BP', 10]) == ''
+            assert run([straw, 'expected', 'NONE', path, 'chrA', 'chrB', 'BP', 10]) == ''
         fixture(path)
         # Region numbers are consumed as supplied: both numeric endpoints are
         # valid, while a value beyond the chromosome length is not.

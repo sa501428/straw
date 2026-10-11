@@ -894,14 +894,22 @@ void File::stream(const std::string &matrixType, const std::string &norm,
         return;
     std::vector<double> n1, n2, expected;
     double scale = 1;
+    double transExpected = 0;
     uint64_t expectedBegin = 0;
     if (norm != "NONE" && matrixType != "expected") {
         auto ni = p.normId(norm);
         n1 = p.vector(0, ni, x.chr, u, ri, scale, x.first, x.last);
         n2 = p.vector(0, ni, y.chr, u, ri, scale, y.first, y.last);
     }
-    if (matrixType != "observed") {
-        require(x.chr == y.chr, "V10 expected values are defined only for cis matrices");
+    if (matrixType != "observed" && x.chr != y.chr) {
+        const auto *z = p.zoom({std::min(x.chr, y.chr), std::max(x.chr, y.chr)}, u, ri);
+        if (!z) return;
+        double sum = double(z->sum);
+        if (z->type) std::memcpy(&sum, &z->sum, sizeof(sum));
+        // As in V9, use the raw whole-matrix mean even for normalized O/E.
+        transExpected = (sum / p.h.bins(x.chr, u, ri)) / p.h.bins(y.chr, u, ri);
+    }
+    if (matrixType != "observed" && x.chr == y.chr) {
         expectedBegin = x.last <= y.first   ? y.first - x.last + 1
                         : y.last <= x.first ? x.first - y.last + 1
                                             : 0;
@@ -923,11 +931,14 @@ void File::stream(const std::string &matrixType, const std::string &norm,
                 value /= a * b;
             }
             if (matrixType != "observed") {
-                uint64_t d = r.binX > r.binY ? r.binX - r.binY : r.binY - r.binX;
-                if (d < expectedBegin || d - expectedBegin >= expected.size() || !scale ||
-                    !std::isfinite(scale))
-                    return;
-                double e = expected[d - expectedBegin] / scale;
+                double e = transExpected;
+                if (x.chr == y.chr) {
+                    uint64_t d = r.binX > r.binY ? r.binX - r.binY : r.binY - r.binX;
+                    if (d < expectedBegin || d - expectedBegin >= expected.size() || !scale ||
+                        !std::isfinite(scale))
+                        return;
+                    e = expected[d - expectedBegin] / scale;
+                }
                 if (!e || !std::isfinite(e))
                     return;
                 value = matrixType == "oe" ? value / e : e;

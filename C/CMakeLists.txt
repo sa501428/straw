@@ -49,4 +49,7 @@ if(BUILD_TESTING)
   target_link_libraries(straw_c_smoke PRIVATE straw_c_api)
   add_test(NAME c_api_smoke
     COMMAND straw_c_smoke ${CMAKE_CURRENT_SOURCE_DIR}/../R/inst/extdata/test.hic)
+  add_executable(straw_c_trans tests/test_straw_c_trans.c)
+  set_target_properties(straw_c_trans PROPERTIES LINKER_LANGUAGE CXX)
+  target_link_libraries(straw_c_trans PRIVATE straw_c_api)
 endif()

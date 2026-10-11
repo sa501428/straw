@@ -54,6 +54,11 @@ if(BUILD_TESTING)
     add_test(NAME contact_orientation
       COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_orientation.py
               $<TARGET_FILE:straw_cli> ${CMAKE_CURRENT_SOURCE_DIR}/../R/inst/extdata/test.hic)
+    if(TARGET straw_c_trans)
+      add_test(NAME c_api_v10_trans
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_trans_c.py
+                $<TARGET_FILE:straw_c_trans>)
+    endif()
   endif()
 endif()
 

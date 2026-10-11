@@ -381,7 +381,14 @@ counts and float scores, BP/FRAG metadata, and all three compressed vector
 transforms. Derived matrices aggregate raw source cells before applying the
 **target** resolution's normalization and expected vectors. Missing capabilities
 and corrupt records raise errors; a missing chromosome pair is an empty matrix.
-V10 expected/OE queries are defined for cis matrices only.
+For cis, expected/OE queries use the matching target-resolution expected vector.
+For trans, `expected` is the raw whole-matrix mean:
+`(sumCountsOrScores / nBins1) / nBins2`; `oe` divides observed or normalized
+contacts by that scalar, as in V9. No cis expected vectors are needed for trans.
+V10 uses its own bin geometry (including partial BP bins and FRAG bin counts),
+and the requested resolution's descriptor even for derived matrices. Zero or
+non-finite means make expected/OE unavailable. Query windows do not change the
+denominator. The C API and Python/R bindings share this implementation.
 
 The standard writer pyramid derives 2 and 5 bp from 1 bp, 20 and 50 bp from
 10 bp, 200 and 500 bp from 100 bp, and 2 kb from 1 kb. Files may override those
