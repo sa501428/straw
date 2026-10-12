@@ -792,6 +792,49 @@ std::vector<int32_t> File::derivedResolutions(const std::string &unit) const {
 std::string File::genome() const { return impl->h.genome; }
 std::vector<std::string> File::normalizations() const { return impl->h.norms; }
 std::vector<std::pair<std::string, std::string>> File::attributes() const { return impl->h.attributes; }
+bool File::allOverview(AllOverview &result) const {
+    std::map<std::string, std::string> attrs;
+    for (const auto &a : impl->h.attributes) attrs[a.first] = a.second;
+    if (attrs["hicAll.version"] != "1") return false;
+    auto number = [&](const std::string &key) {
+        const auto &text = attrs["hicAll." + key];
+        require(!text.empty() && text.find_first_not_of("0123456789") == std::string::npos,
+                "invalid scaled All " + key);
+        uint64_t n = std::stoull(text);
+        require(n > 0, "invalid scaled All " + key); return n;
+    };
+    result = {};
+    result.finestResolution = u32(number("finestResolution"));
+    result.sourceResolution = u32(number("sourceResolution"));
+    result.groupFactor = number("groupFactor");
+    result.binCount = u32(number("binCount"));
+    require(result.groupFactor <= UINT64_MAX / result.sourceResolution, "All scale overflow");
+    result.effectiveResolution = result.groupFactor * result.sourceResolution;
+    result.chromosomeIndex = UINT32_MAX;
+    uint64_t total = 0;
+    std::istringstream bins(attrs["hicAll.chromosomeBins"]);
+    for (const auto &c : impl->h.chroms) {
+        std::string name = c.name;
+        std::transform(name.begin(), name.end(), name.begin(), [](unsigned char v) { return std::tolower(v); });
+        if (name == "all") { result.chromosomeIndex = c.index; continue; }
+        std::string word;
+        require(bool(std::getline(bins, word, ',')) && !word.empty() &&
+                word.find_first_not_of("0123456789") == std::string::npos, "invalid All chromosome layout");
+        uint64_t n = std::stoull(word), length = c.length;
+        require(n == length / result.sourceResolution + (length % result.sourceResolution != 0),
+                "inconsistent All chromosome bins");
+        result.chromosomeIndices.push_back(c.index);
+        result.sourceOffsets.push_back(total); result.chromosomeBins.push_back(n);
+        require(n <= UINT64_MAX - total, "All layout overflow"); total += n;
+    }
+    std::string trailing;
+    require(!std::getline(bins, trailing, ',') && result.chromosomeIndex != UINT32_MAX &&
+            !impl->h.resolutions[0].empty() && result.finestResolution == impl->h.resolutions[0][0].bin &&
+            uint64_t(impl->h.chroms[result.chromosomeIndex].length) == uint64_t(result.binCount) * result.finestResolution &&
+            total / result.groupFactor + (total % result.groupFactor != 0) == result.binCount,
+            "inconsistent scaled All overview");
+    return true;
+}
 bool File::hasMatrix(const std::string &chr1, const std::string &chr2,
                      const std::string &unit, int32_t resolution) {
     auto &p = *impl;

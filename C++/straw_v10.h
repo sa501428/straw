@@ -19,6 +19,13 @@ using Callback = std::function<void(const Record &)>;
 
 bool isV10(const std::string &path);
 
+struct AllOverview {
+    uint32_t chromosomeIndex, finestResolution, sourceResolution, binCount;
+    uint64_t groupFactor, effectiveResolution;
+    std::vector<uint32_t> chromosomeIndices;
+    std::vector<uint64_t> sourceOffsets, chromosomeBins;
+};
+
 class File {
   public:
     explicit File(const std::string &path);
@@ -33,6 +40,9 @@ class File {
     std::string genome() const;
     std::vector<std::string> normalizations() const;
     std::vector<std::pair<std::string, std::string>> attributes() const;
+    // Optional scaled-All metadata. Queries still use ordinary synthetic BP
+    // coordinates and finestResolution, with raw NONE normalization.
+    bool allOverview(AllOverview &result) const;
     std::vector<StrawNormalizationVector> normalizationEntries();
     void streamNormalization(const StrawNormalizationVector &entry,
                              const std::function<void(uint32_t)> &consume);
