@@ -19,5 +19,18 @@ int main(int argc, char **argv) {
     sum = 0; cells = 0;
     file.raw("All", "All", "BP", 100, 0, 1, 0, 1, [&](const straw_v10::Record &r) { sum += r.count; ++cells; });
     assert(cells == 1 && sum == (uint64_t(1) << 53) + 49);
+    if (argc > 2) {
+        straw_v10::File kb(argv[2]);
+        assert(kb.allOverview(all));
+        assert(all.version == 2 && all.syntheticLength == 170 && all.displayResolution == 17);
+        assert(all.storageStride == 17 && all.coordinateScale == 1000 && all.binCount == 10);
+        assert(all.sourceOffsets.at(1) == 95000 && all.chromosomeLengths.at(0) == 95000);
+        sum = 0; cells = 0;
+        kb.raw("All", "All", "BP", 1, 0, 170, 0, 170, [&](const straw_v10::Record &r) {
+            assert(r.binX % 17 == 0 && r.binY % 17 == 0);
+            sum += r.count; ++cells;
+        });
+        assert(cells == 2 && sum == (uint64_t(1) << 53) + 49);
+    }
     std::cout << "Scaled All: layout, finest query, exact counts, collapsed level and omitted trans passed\n";
 }

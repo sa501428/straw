@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+sys.dont_write_bytecode = True
 
 Z = ctypes.CDLL(ctypes.util.find_library('zstd') or '/opt/homebrew/lib/libzstd.dylib')
 Z.ZSTD_compressBound.argtypes = [ctypes.c_size_t]
@@ -244,7 +245,13 @@ def main():
             assert run([straw, 'observed', 'VC', path, 'chrA', 'chrA', 'BP', 20]).splitlines() == ['0\t0\t0.0625', '0\t20\t0.0625', '20\t20\t0.3125']
             assert '10\t20\t0.025' in run([straw, 'oe', 'VC', path, 'chrA:10:20', 'chrA:20:30', 'BP', 10])
             assert '20\t10\t1' in run([straw, 'observed', 'NONE', path, 'chrA:20:30', 'chrA:10:20', 'BP', 10])
-            assert run([straw, 'observed', 'NONE', path, 'chrA:0:10', 'chrA:10:20', 'BP', 10]) == ''
+            assert run([straw, 'observed', 'NONE', path, 'chrA:0:10', 'chrA:10:20', 'BP', 10]).strip() == '10\t20\t1'
+            assert run([straw, 'observed', 'NONE', path, 'chrA:10:10', 'chrA:20:20', 'BP', 10]).strip() == '10\t20\t1'
+            assert run([straw, 'observed', 'NONE', path, 'chrA:11:19', 'chrA:20:20', 'BP', 10]) == ''
+            point = run([straw, 'observed', 'NONE', path, 'chrA:10:10', 'chrA:20:20', 'MATRIX', 10])
+            assert point.strip() == '1'
+            dense = run([straw, 'observed', 'NONE', path, 'chrA:1:10', 'chrA:11:20', 'MATRIX', 10])
+            assert [list(map(float, row.split())) for row in dense.splitlines()] == [[0,0],[0,1]]
             assert len(run([probe, path, 'raw', 'chrA', 'chrA', 1, 'FRAG']).splitlines()) == 3
             assert run([probe, path, 'callbacks']).splitlines()[-1] == '3'
             run([probe, path, 'meta'])
@@ -284,6 +291,8 @@ def main():
         run([probe, path, 'raw', 'chrA', 'chrA', 10], ok=False)
         fixture(path, values=((1 << 64)-1, 1, 1))
         run([probe, path, 'raw', 'chrA', 'chrA', 20], ok=False)
+        from review_fixture import check
+        check(straw, probe, pathlib.Path(d))
         if "--http" not in sys.argv:
             print("V10 local reader conformance passed (HTTP test is opt-in)")
             return

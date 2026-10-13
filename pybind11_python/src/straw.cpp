@@ -26,9 +26,9 @@ class PythonMatrixZoomData {
     py::array getRecordsAsMatrix(int64_t x0, int64_t x1, int64_t y0, int64_t y1) const {
         const auto records = getRecords(x0, x1, y0, y1);
         const int64_t firstX = x0 / resolution;
-        const int64_t lastX = x0 == x1 ? firstX : x1 / resolution + (x1 % resolution != 0);
+        const int64_t lastX = x1 / resolution + 1;
         const int64_t firstY = y0 / resolution;
-        const int64_t lastY = y0 == y1 ? firstY : y1 / resolution + (y1 % resolution != 0);
+        const int64_t lastY = y1 / resolution + 1;
         std::vector<std::vector<float>> matrix(
             static_cast<size_t>(lastX - firstX),
             std::vector<float>(static_cast<size_t>(lastY - firstY), 0));
@@ -37,8 +37,8 @@ class PythonMatrixZoomData {
             if (bx >= firstX && bx < lastX && by >= firstY && by < lastY)
                 matrix[static_cast<size_t>(bx - firstX)][static_cast<size_t>(by - firstY)] =
                     record.counts;
-            if (chr1.index == chr2.index && bx != by && by >= firstX && by < lastX &&
-                bx >= firstY && bx < lastY)
+            if (chr1.index == chr2.index && bx != by && record.binY >= x0 && record.binY <= x1 &&
+                record.binX >= y0 && record.binX <= y1)
                 matrix[static_cast<size_t>(by - firstX)][static_cast<size_t>(bx - firstY)] =
                     record.counts;
         }

@@ -78,5 +78,6 @@ if(BUILD_TESTING)
   target_link_libraries(scaled_all_probe PRIVATE straw_core)
   # Assertions must remain enabled in Release test builds.
   target_compile_options(scaled_all_probe PRIVATE -UNDEBUG)
-  add_test(NAME scaled_all COMMAND scaled_all_probe ${CMAKE_CURRENT_SOURCE_DIR}/tests/pseudo-all.hic)
+  add_test(NAME scaled_all COMMAND scaled_all_probe ${CMAKE_CURRENT_SOURCE_DIR}/tests/pseudo-all.hic
+           ${CMAKE_CURRENT_SOURCE_DIR}/tests/kilobase-all.hic)
 endif()

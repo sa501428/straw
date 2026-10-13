@@ -33,6 +33,20 @@ with tempfile.TemporaryDirectory() as directory:
                 assert abs(float(zoom.getRecordsAsMatrix(0, 10, 0, 10)[0,0])-expected) < 1e-5
                 assert abs(float(hicstraw.strawAsMatrix('oe', norm, str(path),
                     'chrB:0:10', 'chrA:0:10', 'BP', resolution)[0,0])-expected) < 1e-5
+        for resolution, x in ((10, 10), (20, 0)):
+            zoom = hicstraw.HiCFile(str(path)).getMatrixZoomData('chrA', 'chrB', 'observed', 'NONE', 'BP', resolution)
+            point = zoom.getRecords(x, x, 20, 20)
+            assert len(point) == 1 and point[0].counts == 1
+            dense = zoom.getRecordsAsMatrix(x, x, 20, 20)
+            assert dense.shape == (1, 1) and dense[0, 0] == 1
+            direct = hicstraw.strawAsMatrix('observed', 'NONE', str(path), f'chrA:{x}:{x}', 'chrB:20:20', 'BP', resolution)
+            assert direct.shape == (1, 1) and direct[0, 0] == 1
+        zoom = hicstraw.HiCFile(str(path)).getMatrixZoomData('chrA', 'chrB', 'observed', 'NONE', 'BP', 10)
+        assert not zoom.getRecords(11, 19, 20, 20)
+        assert zoom.getRecordsAsMatrix(1, 10, 11, 20).tolist() == [[0., 0.], [0., 1.]]
         frag = hicstraw.straw('oe', 'NONE', str(path), 'chrB', 'chrA', 'FRAG', 1)
         assert len(frag) == 3 and abs(frag[0].counts-64/7) < 1e-5
+    fixture(path)
+    zoom = hicstraw.HiCFile(str(path)).getMatrixZoomData('chrA', 'chrA', 'observed', 'NONE', 'BP', 10)
+    assert zoom.getRecordsAsMatrix(11, 20, 1, 20).tolist() == [[0., 0., 0.], [0., 1., 0.]]
 print('Python trans expected/OE: count/score, raw/normalized, derived, reversed, window, dense, FRAG passed')

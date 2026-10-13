@@ -548,62 +548,110 @@ struct File::Impl {
             });
             return;
         }
-        const Zoom &s = *zoom(key, unit, z->source);
-        uint64_t factor = z->bin / s.bin;
-        struct Acc {
-            uint64_t count = 0;
-            double score = 0;
+        const Zoom &source = *zoom(key, unit, z->source);
+        const uint64_t factor = z->bin / source.bin;
+        constexpr size_t limit = 65536;
+        struct Split {};
+        struct Acc { uint64_t count = 0; double score = 0; };
+        uint64_t emitted = 0, total = 0;
+        auto publish = [&](const Record &r) {
+            ++emitted;
+            if (!r.isScore) total = add(total, r.count);
+            cb(r);
         };
-        std::map<std::pair<uint32_t, uint32_t>, Acc> sums;
-        // The source cells used to be buffered whole in a second std::map purely
-        // so duplicates could be detected. A hash set of the packed coordinate
-        // does the same job without holding a Record per source cell.
-        std::unordered_set<uint64_t> seen;
-        // Integer counts are order-independent, so they accumulate as cells
-        // arrive. Float scores are not, so they keep the previous behaviour of
-        // being summed in ascending (binY, binX) source order.
-        std::vector<std::pair<std::pair<uint32_t, uint32_t>, float>> scores;
-        materialized(key, s, x0 * factor, std::min(x1 * factor, h.bins(key.first, unit, s.ri)),
-                     y0 * factor, std::min(y1 * factor, h.bins(key.second, unit, s.ri)),
-                     [&](const Record &r) {
-                         uint32_t x = r.binX / factor, y = r.binY / factor;
-                         if (!inside(x, y))
-                             return;
-                         require(seen.insert((uint64_t(r.binY) << 32) | r.binX).second,
-                                 "duplicate source cell");
-                         if (!z->type) {
-                             auto &a = sums[{y, x}];
-                             a.count = add(a.count, r.count);
-                         } else {
-                             scores.emplace_back(std::make_pair(r.binY, r.binX), r.score);
-                         }
-                     });
-        if (z->type) {
-            std::sort(scores.begin(), scores.end(),
-                      [](const std::pair<std::pair<uint32_t, uint32_t>, float> &a,
-                         const std::pair<std::pair<uint32_t, uint32_t>, float> &b) {
-                          return a.first < b.first;
-                      });
-            for (const auto &entry : scores) {
-                auto &a = sums[{entry.first.first / factor, entry.first.second / factor}];
-                require(std::isfinite(entry.second), "nonfinite derived source score");
-                a.score += double(entry.second);
-                require(std::isfinite(a.score), "derived score overflow");
+        // For an unusually large score aggregation factor, even one target
+        // pixel may exceed the buffer. Traverse source rows in bounded batches.
+        std::function<void(uint64_t,uint64_t,uint64_t,uint64_t,double&)> orderedScore;
+        orderedScore = [&](uint64_t a, uint64_t b, uint64_t c, uint64_t d, double &sum) {
+            std::vector<Record> records;
+            try {
+                materialized(key, source, a, b, c, d, [&](const Record &r) {
+                    if (r.binX < a || r.binX >= b || r.binY < c || r.binY >= d) return;
+                    if (records.size() == limit) throw Split{};
+                    records.push_back(r);
+                });
+            } catch (const Split &) {
+                std::vector<Record>().swap(records);
+                if (d - c > 1) {
+                    const auto mid = c + (d - c) / 2;
+                    orderedScore(a, b, c, mid, sum); orderedScore(a, b, mid, d, sum);
+                } else {
+                    require(b - a > 1, "duplicate source cells");
+                    const auto mid = a + (b - a) / 2;
+                    orderedScore(a, mid, c, d, sum); orderedScore(mid, b, c, d, sum);
+                }
+                return;
             }
-        }
-        if (x0 == 0 && y0 == 0 && x1 == h.bins(key.first, unit, ri) &&
-            y1 == h.bins(key.second, unit, ri)) {
-            require(sums.size() == z->occupied, "derived occupied count mismatch");
-            if (!z->type) {
-                uint64_t total = 0;
-                for (const auto &e : sums)
-                    total = add(total, e.second.count);
-                require(total == z->sum, "derived sum mismatch");
+            std::sort(records.begin(), records.end(), [](const Record &a, const Record &b) {
+                return std::tie(a.binY, a.binX) < std::tie(b.binY, b.binX);
+            });
+            for (const auto &r : records) {
+                require(std::isfinite(r.score), "nonfinite derived source score");
+                sum += double(r.score);
+                require(std::isfinite(sum), "derived score overflow");
             }
-        }
-        for (const auto &e : sums)
-            cb(Record{e.first.second, e.first.first, e.second.count,
-                      static_cast<float>(e.second.score), z->type != 0});
+        };
+        std::function<void(uint64_t,uint64_t,uint64_t,uint64_t)> visit;
+        visit = [&](uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
+            std::map<std::pair<uint32_t,uint32_t>, Acc> sums;
+            std::vector<Record> scores;
+            try {
+                materialized(key, source, a * factor, std::min(b * factor, h.bins(key.first, unit, source.ri)),
+                             c * factor, std::min(d * factor, h.bins(key.second, unit, source.ri)),
+                             [&](const Record &r) {
+                    const uint32_t x = r.binX / factor, y = r.binY / factor;
+                    // Assign a cis cell to exactly one query tile even when
+                    // both its canonical and reflected positions are requested.
+                    uint32_t px = x, py = y;
+                    if (!(x >= x0 && x < x1 && y >= y0 && y < y1)) {
+                        if (key.first != key.second) return;
+                        std::swap(px, py);
+                    }
+                    if (px < a || px >= b || py < c || py >= d) return;
+                    if (z->type) {
+                        if (scores.size() == limit) throw Split{};
+                        scores.push_back(r);
+                    } else {
+                        auto &acc = sums[{y, x}];
+                        acc.count = add(acc.count, r.count);
+                        if (sums.size() > limit) throw Split{};
+                    }
+                });
+            } catch (const Split &) {
+                // Release the parent buffers before descending.
+                sums.clear(); std::vector<Record>().swap(scores);
+                if (d - c > 1) {
+                    const auto mid = c + (d - c) / 2;
+                    visit(a, b, c, mid); visit(a, b, mid, d);
+                } else if (b - a > 1) {
+                    const auto mid = a + (b - a) / 2;
+                    visit(a, mid, c, d); visit(mid, b, c, d);
+                } else {
+                    uint64_t x = a, y = c;
+                    if (key.first == key.second && x > y) std::swap(x, y);
+                    double sum = 0;
+                    orderedScore(x * factor, std::min((x + 1) * factor, h.bins(key.first, unit, source.ri)),
+                                 y * factor, std::min((y + 1) * factor, h.bins(key.second, unit, source.ri)), sum);
+                    publish(Record{u32(x), u32(y), 0, static_cast<float>(sum), true});
+                }
+                return;
+            }
+            std::sort(scores.begin(), scores.end(), [](const Record &a, const Record &b) {
+                return std::tie(a.binY, a.binX) < std::tie(b.binY, b.binX);
+            });
+            for (const auto &r : scores) {
+                require(std::isfinite(r.score), "nonfinite derived source score");
+                auto &acc = sums[{r.binY / factor, r.binX / factor}];
+                acc.score += double(r.score);
+                require(std::isfinite(acc.score), "derived score overflow");
+            }
+            for (const auto &e : sums)
+                publish(Record{e.first.second, e.first.first, e.second.count,
+                               static_cast<float>(e.second.score), z->type != 0});
+        };
+        visit(x0, x1, y0, y1);
+        if (x0 == 0 && y0 == 0 && x1 == h.bins(key.first, unit, ri) && y1 == h.bins(key.second, unit, ri))
+            require(emitted == z->occupied && (z->type || total == z->sum), "derived matrix statistics mismatch");
     }
     std::vector<double> vector(uint8_t kind, uint32_t norm, uint32_t chr, uint8_t unit, uint32_t ri,
                                double &scale, uint64_t begin = 0, uint64_t end = UINT64_MAX,
@@ -736,7 +784,7 @@ struct File::Impl {
     }
     struct Region {
         uint32_t chr;
-        uint64_t first, last;
+        uint64_t first, last, origin, end;
     };
     Region region(const std::string &location, uint8_t unit, uint32_t ri) const {
         auto colon = location.find(':');
@@ -753,13 +801,14 @@ struct File::Impl {
             };
             a = number(location.substr(colon + 1, second - colon - 1));
             b = number(location.substr(second + 1));
-            // Consume the caller's numeric values directly. V10 does not
-            // classify or convert their coordinate origin; this API's end is
-            // exclusive and may equal the chromosome length.
+            // Straw's external genomic bounds are inclusive, for every version.
+            // Internal bin rectangles remain half-open.
             require(a <= b && b <= length, "region out of bounds");
         }
         uint64_t bin = h.resolutions[unit][ri].bin;
-        return {chr, a / bin, a == b ? a / bin : b / bin + (b % bin != 0)};
+        const uint64_t bins = h.bins(chr, unit, ri);
+        const uint64_t first = std::min(bins, a / bin + (a % bin != 0));
+        return {chr, first, std::max(first, std::min(bins, b / bin + 1)), a / bin, b / bin + 1};
     }
 };
 
@@ -795,7 +844,7 @@ std::vector<std::pair<std::string, std::string>> File::attributes() const { retu
 bool File::allOverview(AllOverview &result) const {
     std::map<std::string, std::string> attrs;
     for (const auto &a : impl->h.attributes) attrs[a.first] = a.second;
-    if (attrs["hicAll.version"] != "1") return false;
+    if (attrs["hicAll.version"] != "1" && attrs["hicAll.version"] != "2") return false;
     auto number = [&](const std::string &key) {
         const auto &text = attrs["hicAll." + key];
         require(!text.empty() && text.find_first_not_of("0123456789") == std::string::npos,
@@ -804,12 +853,19 @@ bool File::allOverview(AllOverview &result) const {
         require(n > 0, "invalid scaled All " + key); return n;
     };
     result = {};
+    result.version = u32(number("version"));
     result.finestResolution = u32(number("finestResolution"));
     result.sourceResolution = u32(number("sourceResolution"));
     result.groupFactor = number("groupFactor");
     result.binCount = u32(number("binCount"));
     require(result.groupFactor <= UINT64_MAX / result.sourceResolution, "All scale overflow");
-    result.effectiveResolution = result.groupFactor * result.sourceResolution;
+    result.storageStride = result.version == 2 ? number("storageStride") : 1;
+    result.coordinateScale = result.version == 2 ? number("coordinateScale") : 0;
+    require(result.storageStride <= UINT64_MAX / result.finestResolution, "All stride overflow");
+    result.displayResolution = result.storageStride * result.finestResolution;
+    require(result.version != 2 || result.coordinateScale <= UINT64_MAX / result.displayResolution, "All physical scale overflow");
+    result.effectiveResolution = result.version == 2 ? result.coordinateScale * result.displayResolution
+        : result.groupFactor * result.sourceResolution;
     result.chromosomeIndex = UINT32_MAX;
     uint64_t total = 0;
     std::istringstream bins(attrs["hicAll.chromosomeBins"]);
@@ -825,13 +881,20 @@ bool File::allOverview(AllOverview &result) const {
                 "inconsistent All chromosome bins");
         result.chromosomeIndices.push_back(c.index);
         result.sourceOffsets.push_back(total); result.chromosomeBins.push_back(n);
-        require(n <= UINT64_MAX - total, "All layout overflow"); total += n;
+        result.chromosomeLengths.push_back(length);
+        uint64_t amount = result.version == 2 ? length : n;
+        require(amount <= UINT64_MAX - total, "All layout overflow"); total += amount;
     }
+    if (result.chromosomeIndex != UINT32_MAX) result.syntheticLength = impl->h.chroms[result.chromosomeIndex].length;
+    bool consistent = result.version == 2
+        ? result.syntheticLength == std::max<uint64_t>(1, total / result.coordinateScale) &&
+          result.binCount == result.syntheticLength / result.displayResolution + (result.syntheticLength % result.displayResolution != 0)
+        : result.syntheticLength == uint64_t(result.binCount) * result.finestResolution &&
+          total / result.groupFactor + (total % result.groupFactor != 0) == result.binCount;
     std::string trailing;
     require(!std::getline(bins, trailing, ',') && result.chromosomeIndex != UINT32_MAX &&
             !impl->h.resolutions[0].empty() && result.finestResolution == impl->h.resolutions[0][0].bin &&
-            uint64_t(impl->h.chroms[result.chromosomeIndex].length) == uint64_t(result.binCount) * result.finestResolution &&
-            total / result.groupFactor + (total % result.groupFactor != 0) == result.binCount,
+            consistent,
             "inconsistent scaled All overview");
     return true;
 }
@@ -998,17 +1061,17 @@ std::vector<std::vector<float>> File::matrix(const std::string &type, const std:
     auto u = unitId(unit);
     auto ri = impl->resolutionId(u, resolution);
     auto x = impl->region(a, u, ri), y = impl->region(b, u, ri);
-    uint64_t rows = x.last - x.first, cols = y.last - y.first;
+    uint64_t rows = x.end - x.origin, cols = y.end - y.origin;
     require(rows <= allocationLimit / sizeof(std::vector<float>) &&
                 (!cols || rows <= allocationLimit / sizeof(float) / cols),
             "dense matrix exceeds allocation limit");
     std::vector<std::vector<float>> result(rows, std::vector<float>(cols, 0));
     stream(type, norm, a, b, unit, resolution, [&](const contactRecord &r) {
         uint64_t bx = r.binX / resolution, by = r.binY / resolution;
-        result.at(bx - x.first).at(by - y.first) = r.counts;
+        result.at(bx - x.origin).at(by - y.origin) = r.counts;
         if (x.chr == y.chr && bx != by && by >= x.first && by < x.last && bx >= y.first &&
             bx < y.last)
-            result[by - x.first][bx - y.first] = r.counts;
+            result[by - x.origin][bx - y.origin] = r.counts;
     });
     return result;
 }

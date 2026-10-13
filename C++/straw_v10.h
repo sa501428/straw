@@ -22,6 +22,9 @@ bool isV10(const std::string &path);
 struct AllOverview {
     uint32_t chromosomeIndex, finestResolution, sourceResolution, binCount;
     uint64_t groupFactor, effectiveResolution;
+    uint32_t version = 1;
+    uint64_t storageStride = 1, displayResolution = 0, coordinateScale = 0, syntheticLength = 0;
+    std::vector<uint64_t> chromosomeLengths;
     std::vector<uint32_t> chromosomeIndices;
     std::vector<uint64_t> sourceOffsets, chromosomeBins;
 };

@@ -61,3 +61,4 @@ hic_straw.egg-info
 /run
 /tools
 /C++/build-v10
+*.hic

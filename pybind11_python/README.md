@@ -7,8 +7,10 @@ The reader supports legacy V6-V9 files and consolidated-format V10 files. V10
 queries include materialized and derived resolutions, Zstandard-compressed
 blocks and vectors, BP/FRAG units, and normalization and expected-value data.
 Numeric V10 region values are consumed as supplied without requiring or
-inferring a coordinate origin; the current `start:end` API treats `end` as an
-exclusive numeric boundary.
+inferring a coordinate origin. As in V9, `start:end` includes both numeric
+endpoints and selects bin starts inside that interval. Point queries include
+the bin at that coordinate. Dense results span `floor(start/bin)` through
+`floor(end/bin)`, including the final row and column.
 Slice and HBS creation are intentionally C++-only and are not exposed by the
 Python module.
 

@@ -397,8 +397,9 @@ materialized divisor as a target's source. The reader follows each file's
 declarations and rejects chained derivations or nonintegral source mappings.
 
 V10 region values are accepted as supplied without classifying them as zero-based
-or one-based. The current `start:end` API uses `end` as an exclusive numeric
-boundary and includes bins overlapping that interval. Reversed chromosome queries return coordinates in the requested
+or one-based. The `start:end` API includes both numeric endpoints and selects bin starts
+inside that interval, matching V9. A point query such as `10:10` includes the bin
+starting at 10. Dense matrices span `floor(start/bin)` through `floor(end/bin)`. Reversed chromosome queries return coordinates in the requested
 chromosome order. Cis sparse queries emit each canonical cell once, transposing
 it when only its reflected position intersects the window; `MATRIX` output fills
 both symmetric entries. FRAG locations use fragment coordinates, and reported
@@ -429,8 +430,10 @@ streaming, region, normalization, dense-matrix, record-count, and slice entry
 points also dispatch to V10. Legacy APIs reject coordinate overflow rather than
 wrapping a 32-bit coordinate. Parsing, decompression, full vectors, and dense
 output have explicit allocation limits (512 MiB per record/allocation class).
-Large whole-matrix queries can still require substantial memory, particularly
-when aggregating a derived resolution.
+Derived streaming queries bound aggregation buffers to 65,536 entries,
+subdividing larger windows and preserving global source-coordinate score order.
+Collecting an entire result or dense matrix still requires memory proportional to
+that output.
 
 ### Remote reads and tests
 
@@ -471,3 +474,14 @@ size is source resolution times group factor; raw queries use the finest
 synthetic resolution. This convention changes no binary fields or file version.
 
 `File::allOverview(AllOverview&)` returns false when the convention is absent.
+
+The All metadata API also supports convention **version 2**, which stores the
+V9-style unpadded genome length in kilobases and sparse overview contacts at the
+finest advertised BP resolution. `storageStride` / `storage_stride` relates raw
+finest bin indices to compact display bins; `displayResolution` /
+`display_resolution` is the virtual overview interval, and `coordinateScale` /
+`coordinate_scale` is normally 1000. Version-one compact All remains supported.
+Use the updated native `hic_v10 add-all --rebuild-all INPUT OUTPUT` to migrate
+existing All from its real-chromosome data. This introduces no `.hic` binary
+format change. `kilobase-all.hic` regression fixtures cover unpadded boundaries,
+sparse coordinates, exact uint64 totals and version-one compatibility.
