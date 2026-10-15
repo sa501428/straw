@@ -74,10 +74,19 @@ class PythonMatrixZoomData {
 class PythonHiCFile {
   public:
     explicit PythonHiCFile(std::string path) : fileName(std::move(path)) {
-        const StrawFileInfo info = getFileInfo(fileName);
-        genomeID = info.genome;
-        chromosomes = info.chromosomes;
-        resolutions = info.bpResolutions;
+        // HiCFile exposes header metadata only. getFileInfo also enumerates
+        // normalizations, which reads every v9 vector header over HTTP.
+        if (straw_v10::isV10(fileName)) {
+            straw_v10::File file(fileName);
+            genomeID = file.genome();
+            chromosomes = file.chromosomes();
+            resolutions = file.resolutions("BP");
+        } else {
+            HiCFile file(fileName);
+            genomeID = file.getGenomeID();
+            chromosomes = file.getChromosomes();
+            resolutions = file.getResolutions();
+        }
         for (const auto &c : chromosomes) chromosomeByName[c.name] = c;
     }
     std::string getGenomeID() const { return genomeID; }
