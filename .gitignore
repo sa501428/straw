@@ -62,3 +62,5 @@ hic_straw.egg-info
 /tools
 /C++/build-v10
 *.hic
+*.pyc
+/benchmarks
