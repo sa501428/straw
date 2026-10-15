@@ -48,6 +48,14 @@ if(BUILD_TESTING)
     add_test(NAME normalization_dump
       COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_norm_dump.py
               $<TARGET_FILE:straw_cli> $<TARGET_FILE:v10_api_probe>)
+    add_test(NAME v9_direct_normalization_index
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_v9_index.py
+              $<TARGET_FILE:straw_cli> --probe $<TARGET_FILE:v10_api_probe>)
+    if(TARGET straw_c_api)
+      add_test(NAME v9_c_api_direct_normalization_index
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_v9_index.py
+                $<TARGET_FILE:straw_c_api> --backend c)
+    endif()
     add_test(NAME subsample_short
       COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_subsample.py
               $<TARGET_FILE:straw_cli>)
@@ -64,6 +72,14 @@ endif()
 
 option(STRAW_TEST_HTTP "Run tests requiring a loopback HTTP server" OFF)
 if(BUILD_TESTING AND Python3_Interpreter_FOUND AND STRAW_TEST_HTTP)
+  add_test(NAME v9_direct_normalization_http_ranges
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_v9_index.py
+            $<TARGET_FILE:straw_cli> --probe $<TARGET_FILE:v10_api_probe> --http)
+  if(TARGET straw_c_api)
+    add_test(NAME v9_c_api_direct_normalization_http_ranges
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_v9_index.py
+              $<TARGET_FILE:straw_c_api> --backend c --http)
+  endif()
   add_test(NAME normalization_http_ranges
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_norm_dump.py
             $<TARGET_FILE:straw_cli> $<TARGET_FILE:v10_api_probe> --http)

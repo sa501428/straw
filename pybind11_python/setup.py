@@ -3,6 +3,7 @@ from setuptools.command.build_ext import build_ext
 import sys
 import setuptools
 import os
+import glob
 
 __version__ = '1.4.0'
 
@@ -50,6 +51,10 @@ ext_modules = [
     Extension(
         'hicstraw',
         ['src/straw.cpp', 'src/straw_v10.cpp', 'src/norm_vectors.cpp'],
+        # These translation units include the shared core directly. Rebuild
+        # when an included core source/header changes, not just the wrappers.
+        depends=sorted(glob.glob('../C++/*.h')) +
+                ['../C++/straw.cpp', '../C++/straw_v10.cpp', '../C++/norm_vectors.cpp'],
         include_dirs=[
             # Path to pybind11 headers
             GetPybindInclude(),

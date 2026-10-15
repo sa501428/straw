@@ -44,6 +44,8 @@
 #include <queue>
 #include <condition_variable>
 #include "hic_slice.h"
+#include "legacy_norm_index.h"
+#include "file_source.h"
 
 using namespace std;
 
@@ -499,7 +501,8 @@ int64_t readStringFromURL(istream &fin, string &basicString) {
 // at the given normalization and resolution
 bool readFooterURL(CURL *curl, int64_t master, int32_t version, int32_t c1, int32_t c2, const string &matrixType,
                 const string &norm, const string &unit, int32_t resolution, int64_t &myFilePos,
-                indexEntry &c1NormEntry, indexEntry &c2NormEntry, vector<double> &expectedValues) {
+                indexEntry &c1NormEntry, indexEntry &c2NormEntry, vector<double> &expectedValues,
+                int64_t nviPosition, int64_t nviLength) {
 
     int64_t currentPointer = master;
 
@@ -558,6 +561,20 @@ bool readFooterURL(CURL *curl, int64_t master, int32_t version, int32_t c1, int3
     if ((matrixType == "observed" && norm == "NONE") ||
         ((matrixType == "oe" || matrixType == "expected") && norm == "NONE" && c1 != c2))
         return true; // no need to read norm vector index
+
+    // Observed and trans queries do not need cis expected-value vectors.
+    if (version == 9 && nviPosition > 0 && nviLength > 0 && norm != "NONE" &&
+        (matrixType == "observed" || c1 != c2)) {
+        if (uint64_t(nviLength) > straw_v10::allocationLimit || nviPosition > INT64_MAX - nviLength)
+            throw runtime_error("v9 normalization index exceeds allocation limit");
+        int64_t size = 0;
+        unique_ptr<char, decltype(&free)> bytes(getData(curl, nviPosition, nviLength, size), &free);
+        if (size != nviLength) throw runtime_error("truncated v9 normalization index");
+        const auto entries = straw_v9::normalizationIndex(reinterpret_cast<const uint8_t *>(bytes.get()), size);
+        if (!straw_v9::findNormalizationEntries(entries, c1, c2, norm, unit, resolution, c1NormEntry, c2NormEntry))
+            throw runtime_error("v9 normalization vectors not found for requested chromosomes, unit and resolution");
+        return true;
+    }
 
     // read in and ignore expected value maps; don't store; reading these to
     // get to norm vector index
@@ -736,7 +753,8 @@ bool readFooterURL(CURL *curl, int64_t master, int32_t version, int32_t c1, int3
 
 bool readFooter(istream &fin, int64_t master, int32_t version, int32_t c1, int32_t c2, const string &matrixType,
                 const string &norm, const string &unit, int32_t resolution, int64_t &myFilePos,
-                indexEntry &c1NormEntry, indexEntry &c2NormEntry, vector<double> &expectedValues) {
+                indexEntry &c1NormEntry, indexEntry &c2NormEntry, vector<double> &expectedValues,
+                int64_t nviPosition, int64_t nviLength) {
 
     if (version > 8) {
         int64_t nBytes = readInt64FromFile(fin);
@@ -768,6 +786,24 @@ bool readFooter(istream &fin, int64_t master, int32_t version, int32_t c1, int32
     if ((matrixType == "observed" && norm == "NONE") ||
         ((matrixType == "oe" || matrixType == "expected") && norm == "NONE" && c1 != c2))
         return true; // no need to read norm vector index
+
+    if (version == 9 && nviPosition > 0 && nviLength > 0 && norm != "NONE" &&
+        (matrixType == "observed" || c1 != c2)) {
+        if (uint64_t(nviLength) > straw_v10::allocationLimit)
+            throw runtime_error("v9 normalization index exceeds allocation limit");
+        fin.seekg(0, ios::end);
+        const auto end = fin.tellg();
+        if (end < 0 || nviPosition > end || nviLength > end - nviPosition)
+            throw runtime_error("v9 normalization index outside file");
+        fin.seekg(nviPosition);
+        vector<uint8_t> bytes(static_cast<size_t>(nviLength));
+        fin.read(reinterpret_cast<char *>(bytes.data()), nviLength);
+        if (!fin) throw runtime_error("truncated v9 normalization index");
+        const auto entries = straw_v9::normalizationIndex(bytes.data(), bytes.size());
+        if (!straw_v9::findNormalizationEntries(entries, c1, c2, norm, unit, resolution, c1NormEntry, c2NormEntry))
+            throw runtime_error("v9 normalization vectors not found for requested chromosomes, unit and resolution");
+        return true;
+    }
 
     // read in and ignore expected value maps; don't store; reading these to
     // get to norm vector index
@@ -1572,7 +1608,7 @@ public:
     MatrixZoomData(const chromosome &chrom1, const chromosome &chrom2, const string &matrixType,
                    const string &norm, const string &unit, int32_t resolution,
                    int32_t &version, int64_t &master, int64_t &totalFileSize,
-                   const string &fileName) {
+                   const string &fileName, int64_t nviPosition, int64_t nviLength) {
         this->version = version;
         this->fileName = fileName;
         int32_t c01 = chrom1.index;
@@ -1601,13 +1637,13 @@ public:
             foundFooter = readFooterURL(stream.curl, master, version, c1, c2, matrixType, norm, unit,
                                      resolution,
                                      myFilePos,
-                                     c1NormEntry, c2NormEntry, expectedValues);
+                                     c1NormEntry, c2NormEntry, expectedValues, nviPosition, nviLength);
         } else {
             stream.fin.seekg(master, ios::beg);
             foundFooter = readFooter(stream.fin, master, version, c1, c2, matrixType, norm,
                                      unit,
                                      resolution, myFilePos,
-                                     c1NormEntry, c2NormEntry, expectedValues);
+                                     c1NormEntry, c2NormEntry, expectedValues, nviPosition, nviLength);
         }
 
         if (!foundFooter) {
@@ -1999,7 +2035,7 @@ public:
             throw runtime_error("chromosome " + chr2 + " not found in the file");
         }
         return new MatrixZoomData(first->second, second->second, (matrixType), (norm), (unit),
-                                  resolution, version, master, totalFileSize, fileName);
+                                  resolution, version, master, totalFileSize, fileName, nviPosition, nviLength);
     }
 };
 
@@ -2307,7 +2343,14 @@ vector<string> getNormalizationsForFile(const string &fileName) {
         return values;
     }
     vector<string> values{"NONE"};
-    if (HiCFile(fileName).version == 9) {
+    HiCFile file(fileName);
+    if (file.version == 9 && file.nviPosition > 0 && file.nviLength > 0) {
+        straw_file::Source source(fileName);
+        auto bytes = source.read(file.nviPosition, file.nviLength);
+        for (const auto &entry : straw_v9::normalizationIndex(bytes.data(), bytes.size()))
+            if (find(values.begin(), values.end(), entry.normalization) == values.end())
+                values.push_back(entry.normalization);
+    } else if (file.version == 9) {
         StrawNormalizationVectors vectors(fileName);
         for (const auto &entry : vectors.entries())
             if (find(values.begin(), values.end(), entry.normalization) == values.end())
@@ -2819,7 +2862,7 @@ void dumpGenomeWideDataAtResolution(const std::string& matrixType,
             try {
                 MatrixZoomData mzd(chr1, chr2, matrixType, norm, unit, resolution,
                                    hicFile.version, hicFile.master,
-                                   HiCFile::totalFileSize, hicFile.fileName);
+                                   HiCFile::totalFileSize, hicFile.fileName, hicFile.nviPosition, hicFile.nviLength);
                 if (!mzd.foundFooter) continue;
 
                 // Stream through MatrixZoomData rather than reading blocks

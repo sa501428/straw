@@ -47,6 +47,27 @@ cmake -S C++ -B C++/build -DCMAKE_BUILD_TYPE=Release
 cmake --build C++/build --parallel
 ```
 
+V9 observed queries and normalized trans queries use the normalization-index
+position and length stored in the file header, avoiding a walk through the
+expected-value sections. Cis OE/expected queries still read their required
+expected vectors. Files without a usable direct locator retain the legacy
+footer-scan fallback. Normalization-name listing reads the index without
+opening every vector payload.
+
+The optimization applies to the shared C++ core (including Python and all
+`libstraw` bindings), the separate R reader, and the sibling Rust reader.
+Rebuild native libraries when updating the thin language bindings; existing
+release-bundled binaries do not acquire source changes automatically.
+
+The v9 regression suite compares direct and fallback queries, validates index
+bounds, and checks loopback HTTP ranges with `-DSTRAW_TEST_HTTP=ON`. Its fixture
+also supports installed Python and R bindings:
+
+```bash
+python C++/tests/test_v9_index.py C++/build/straw --backend python --http
+python C++/tests/test_v9_index.py /path/to/Rscript --backend r --http
+```
+
 To transfer custom normalization divisors from v9 into an already-built v10 file:
 
 ```sh

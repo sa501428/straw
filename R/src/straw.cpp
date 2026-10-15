@@ -33,6 +33,9 @@
 #include <Rcpp.h>
 #include "zlib.h"
 #include "straw.h"
+#include "../../C++/legacy_norm_index.h"
+#include <memory>
+#include <algorithm>
 using namespace std;
 
 bool strawIsV10(const std::string &path);
@@ -85,13 +88,13 @@ WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp) {
 }
 
 // get a buffer that can be used as an input stream from the URL
-char *getData(CURL *curl, int64_t position, int64_t chunksize) {
+char *getData(CURL *curl, int64_t position, int64_t chunksize, int64_t *received = nullptr) {
     std::ostringstream oss;
     struct MemoryStruct chunk;
 
     chunk.memory = static_cast<char *>(malloc(1));
     chunk.size = 0;    /* no data at this point */
-    oss << position << "-" << position + chunksize;
+    oss << position << "-" << position + chunksize - 1;
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *) &chunk);
     curl_easy_setopt(curl, CURLOPT_RANGE, oss.str().c_str());
     CURLcode res = curl_easy_perform(curl);
@@ -99,7 +102,7 @@ char *getData(CURL *curl, int64_t position, int64_t chunksize) {
         Rcpp::stop("curl_easy_perform() failed: %s.",
                 curl_easy_strerror(res));
     }
-    //  printf("%lu bytes retrieved\n", (int64_t)chunk.size);
+    if (received) *received = static_cast<int64_t>(chunk.size);
 
     return chunk.memory;
 }
@@ -849,8 +852,7 @@ public:
 
     static size_t hdf(char *b, size_t size, size_t nitems, void *userdata) {
         size_t numbytes = size * nitems;
-        b[numbytes + 1] = '\0';
-        string s(b);
+        string s(b, numbytes);
         int32_t found = static_cast<int32_t>(s.find("content-range"));
         if ((size_t)found == string::npos) {
           found = static_cast<int32_t>(s.find("Content-Range"));
@@ -972,7 +974,56 @@ public:
         this->unit = unit;
         this->resolution = resolution;
 
-        if (hiCFile->isHttp) {
+        // Use the header's v9 NVI locator when cis expected values are not
+        // required. In particular, never download master..EOF just for VC.
+        const bool direct = hiCFile->version == 9 && hiCFile->nviPosition > 0 && hiCFile->nviLength > 0 &&
+                            (matrixType == "observed" || c1 != c2);
+        if (direct) {
+            const auto read = [&](int64_t position, int64_t length) {
+                if (position < 0 || length <= 0 || length > 512LL * 1024 * 1024)
+                    Rcpp::stop("Invalid v9 metadata interval.");
+                vector<uint8_t> bytes(static_cast<size_t>(length));
+                if (hiCFile->isHttp) {
+                    int64_t received = 0;
+                    unique_ptr<char, decltype(&free)> data(getData(hiCFile->curl, position, length, &received), &free);
+                    if (received != length) Rcpp::stop("Truncated v9 metadata interval.");
+                    memcpy(bytes.data(), data.get(), bytes.size());
+                } else {
+                    hiCFile->fin.clear();
+                    hiCFile->fin.seekg(0, ios::end);
+                    auto end = hiCFile->fin.tellg();
+                    if (end < 0 || position > end || length > end - position)
+                        Rcpp::stop("V9 metadata interval outside file.");
+                    hiCFile->fin.seekg(position);
+                    hiCFile->fin.read(reinterpret_cast<char *>(bytes.data()), length);
+                    if (!hiCFile->fin) Rcpp::stop("Truncated v9 metadata interval.");
+                }
+                return bytes;
+            };
+            // Matrix keys contain two decimal int32 chromosome indices, so
+            // 50 bytes per entry bounds their strings plus fixed fields.
+            auto prefix = read(hiCFile->master, 12);
+            int32_t count;
+            memcpy(&count, prefix.data() + 8, 4);
+            if (count < 0) Rcpp::stop("Invalid v9 matrix index count.");
+            int64_t length = 12 + int64_t(count) * 50;
+            if (hiCFile->isHttp) length = min(length, hiCFile->totalFileSize - hiCFile->master);
+            else {
+                hiCFile->fin.seekg(0, ios::end);
+                length = min(length, static_cast<int64_t>(hiCFile->fin.tellg()) - hiCFile->master);
+            }
+            auto directory = read(hiCFile->master, length);
+            membuf buffer(reinterpret_cast<char *>(directory.data()), reinterpret_cast<char *>(directory.data() + directory.size()));
+            istream stream(&buffer);
+            foundFooter = readFooter(stream, hiCFile->master, hiCFile->version, c1, c2, "observed", "NONE", unit,
+                                     resolution, myFilePos, c1NormEntry, c2NormEntry, expectedValues);
+            if (norm != "NONE") {
+                auto bytes = read(hiCFile->nviPosition, hiCFile->nviLength);
+                auto entries = straw_v9::normalizationIndex(bytes.data(), bytes.size());
+                if (!straw_v9::findNormalizationEntries(entries, c1, c2, norm, unit, resolution, c1NormEntry, c2NormEntry))
+                    Rcpp::stop("V9 normalization vectors not found for requested chromosomes, unit and resolution.");
+            }
+        } else if (hiCFile->isHttp) {
             char *buffer2;
             int64_t bytes_to_read = hiCFile->totalFileSize - hiCFile->master;
             buffer2 = getData(hiCFile->curl, hiCFile->master, bytes_to_read);
