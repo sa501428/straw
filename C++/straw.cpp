@@ -1171,25 +1171,50 @@ int32_t decompressBlock(indexEntry idx, char *compressedBytes, char *uncompresse
     return static_cast<int32_t>(produced);
 }
 
+// Grow for highly compressible blocks; contact depth does not bound the
+// compression ratio. Keep the legacy fixed-buffer API for external callers.
+static vector<char> decompressGrowing(indexEntry idx, const char* compressed) {
+    const size_t limit = static_cast<size_t>(INT32_MAX);
+    vector<char> bytes(min(limit, max(size_t(65536), size_t(idx.size) * 10)));
+    const bool zstd = isZstdCompressed(compressed, idx.size);
+    for (;;) {
+        size_t produced = 0;
+        bool needsSpace = false;
+        if (zstd) {
+            auto result = ZSTD_decompress(bytes.data(), bytes.size(), compressed, size_t(idx.size));
+            if (!ZSTD_isError(result)) produced = result;
+            else {
+                auto declared = ZSTD_getFrameContentSize(compressed, size_t(idx.size));
+                if (declared != ZSTD_CONTENTSIZE_ERROR && declared != ZSTD_CONTENTSIZE_UNKNOWN && declared > bytes.size()) needsSpace = true;
+                else throw runtime_error("Unable to decompress .hic zstd block");
+            }
+        } else {
+            uLongf length = bytes.size();
+            int status = uncompress(reinterpret_cast<Bytef*>(bytes.data()), &length,
+                                    reinterpret_cast<const Bytef*>(compressed), uLong(idx.size));
+            if (status == Z_OK) produced = length;
+            else if (status == Z_BUF_ERROR) needsSpace = true;
+            else throw runtime_error("Unable to decompress .hic zlib block");
+        }
+        if (!needsSpace) {bytes.resize(produced); return bytes;}
+        if (bytes.size() == limit) throw runtime_error("Decompressed .hic block exceeds 2 GiB");
+        bytes.resize(min(limit, bytes.size() * 2));
+    }
+}
+
 long getNumRecordsInBlock(HiCFileStream &stream, indexEntry idx, int32_t version){
     if (idx.size <= 0) {
         return 0;
     }
-    char *compressedBytes = stream.readCompressedBytes(idx);
-    char *uncompressedBytes = new char[idx.size * DECOMPRESSION_FACTOR];
-    int32_t uncompressedSize = decompressBlock(idx, compressedBytes, uncompressedBytes);
-    if (uncompressedSize < 0) {
-        free(compressedBytes);
-        delete[] uncompressedBytes;
-        throw runtime_error("Unable to decompress .hic block");
-    }
+    unique_ptr<char, decltype(&free)> compressedBytes(stream.readCompressedBytes(idx), &free);
+    auto decoded = decompressGrowing(idx, compressedBytes.get());
+    char *uncompressedBytes = decoded.data();
+    int32_t uncompressedSize = static_cast<int32_t>(decoded.size());
 
     // create stream from buffer for ease of use
     memstream bufferin(uncompressedBytes, uncompressedSize);
     uint64_t nRecords;
     nRecords = static_cast<uint64_t>(readInt32FromFile(bufferin));
-    free(compressedBytes);
-    delete[] uncompressedBytes; // don't forget to delete your heap arrays in C++!
     return nRecords;
 }
 
@@ -1200,14 +1225,10 @@ vector<contactRecord> readBlock(HiCFileStream &stream, indexEntry idx, int32_t v
         vector<contactRecord> v;
         return v;
     }
-    char *compressedBytes = stream.readCompressedBytes(idx);
-    char *uncompressedBytes = new char[idx.size * DECOMPRESSION_FACTOR];
-    int32_t uncompressedSize = decompressBlock(idx, compressedBytes, uncompressedBytes);
-    if (uncompressedSize < 0) {
-        free(compressedBytes);
-        delete[] uncompressedBytes;
-        throw runtime_error("Unable to decompress .hic block");
-    }
+    unique_ptr<char, decltype(&free)> compressedBytes(stream.readCompressedBytes(idx), &free);
+    auto decoded = decompressGrowing(idx, compressedBytes.get());
+    char *uncompressedBytes = decoded.data();
+    int32_t uncompressedSize = static_cast<int32_t>(decoded.size());
 
     // create stream from buffer for ease of use
     memstream bufferin(uncompressedBytes, uncompressedSize);
@@ -1216,8 +1237,6 @@ vector<contactRecord> readBlock(HiCFileStream &stream, indexEntry idx, int32_t v
     // A record cannot be encoded in fewer than 3 bytes, so a declared count that
     // exceeds the payload means the header is corrupt.
     if (nRecords > static_cast<uint64_t>(uncompressedSize)) {
-        free(compressedBytes);
-        delete[] uncompressedBytes;
         throw runtime_error("Corrupt .hic block: record count exceeds block size");
     }
     vector<contactRecord> v(nRecords);
@@ -1347,11 +1366,9 @@ vector<contactRecord> readBlock(HiCFileStream &stream, indexEntry idx, int32_t v
             }
         }
     }
-    free(compressedBytes);
     if (version >= 7) {
         v.resize(static_cast<size_t>(index));
     }
-    delete[] uncompressedBytes; // don't forget to delete your heap arrays in C++!
     return v;
 }
 
@@ -2554,16 +2571,6 @@ bool forEachRawObservedBlockWithNorm(const string &fileName,
     return true;
 }
 
-namespace {
-class ScopedCerrSilence {
-    ostringstream sink;
-    streambuf *previous;
-public:
-    ScopedCerrSilence() : previous(cerr.rdbuf(sink.rdbuf())) {}
-    ~ScopedCerrSilence() { cerr.rdbuf(previous); }
-};
-}
-
 bool getNormalizationVectorForFile(const string &fileName, const string &chromosomeName,
                                    int32_t binsize, const string &norm,
                                    vector<double> &values, const string &unit) {
@@ -2576,11 +2583,10 @@ bool getNormalizationVectorForFile(const string &fileName, const string &chromos
     }
     HiCFile file(fileName);
     if (!file.chromosomeMap.count(chromosomeName)) return false;
-    // Capability probing is expected to fail often (normalizations are
-    // resolution-dependent), so do not emit the legacy query path's diagnostics.
+    // Never redirect the process-global cerr buffer: concurrent probes and
+    // readers otherwise race and can restore a destroyed stack stream buffer.
     MatrixZoomData *mzd;
     {
-        ScopedCerrSilence silence;
         mzd = file.getMatrixZoomData(chromosomeName, chromosomeName,
                                      "observed", norm, unit, binsize);
     }
@@ -2608,7 +2614,6 @@ bool getExpectedVectorForFile(const string &fileName, const string &chromosomeNa
     if (!file.chromosomeMap.count(chromosomeName)) return false;
     MatrixZoomData *mzd;
     {
-        ScopedCerrSilence silence;
         mzd = file.getMatrixZoomData(chromosomeName, chromosomeName,
                                      "expected", norm, unit, binsize);
     }

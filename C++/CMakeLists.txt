@@ -29,6 +29,12 @@ add_executable(straw_cli main.cpp subsample.cpp compare.cpp norm_dump.cpp)
 set_target_properties(straw_cli PROPERTIES OUTPUT_NAME straw)
 target_link_libraries(straw_cli PRIVATE straw_core)
 
+# Small no-output query driver used by benchmarks/loop_latency.  Keeping the
+# timer inside the process excludes process startup and TSV orchestration while
+# exercising the same public C++ straw() entry point as the CLI.
+add_executable(straw_benchmark_query benchmark_query.cpp)
+target_link_libraries(straw_benchmark_query PRIVATE straw_core)
+
 include(CTest)
 
 option(STRAW_BUILD_C_API "Build the stable libstraw C API" ON)

@@ -64,3 +64,14 @@ hic_straw.egg-info
 *.hic
 *.pyc
 /benchmarks
+# Keep the reproducible loop-latency suite in version control, but never its
+# generated plans, timing tables, or plots.
+!/benchmarks/
+/benchmarks/*
+!/benchmarks/loop_latency/
+!/benchmarks/loop_latency/**
+/benchmarks/loop_latency/output/
+/benchmarks/loop_latency/__pycache__/
+/C++/build-loop-latency/
+/.venv-loop-latency/
+/benchmarks/loop_latency/.DS_Store
