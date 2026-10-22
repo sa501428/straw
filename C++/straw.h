@@ -190,6 +190,9 @@ struct StrawFileInfo {
     std::string genome;
     std::vector<chromosome> chromosomes;
     std::vector<int32_t> bpResolutions;
+    // The legacy All matrix often uses its own synthetic-coordinate bin size,
+    // absent from the ordinary chromosome resolution list in the header.
+    std::vector<int32_t> wholeGenomeResolutions;
     std::vector<int32_t> fragResolutions;
     std::vector<std::string> normalizations;
     std::vector<std::pair<std::string, std::string>> attributes;

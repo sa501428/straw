@@ -2078,6 +2078,8 @@ void parsePositions(const string &chrLoc, string &chrom, int64_t &pos1, int64_t 
     }
 }
 
+static vector<int32_t> wholeGenomeResolutions(HiCFile &file);
+
 struct StrawPreparedQuery::Impl {
     string fileName;
     string matrixType;
@@ -2147,9 +2149,14 @@ struct StrawPreparedQuery::Impl {
                                      "requested chromosome is not present in the file");
             const vector<int32_t> &resolutions = queryUnit == "BP"
                 ? legacyFile->resolutions : legacyFile->fragResolutions;
-            if (find(resolutions.begin(), resolutions.end(), queryResolution) == resolutions.end())
-                throw StrawException(StrawErrorCode::Unavailable,
-                                     "requested resolution is not available");
+            if (find(resolutions.begin(), resolutions.end(), queryResolution) == resolutions.end()) {
+                string name = first;
+                transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return std::tolower(c); });
+                const auto overview = queryUnit == "BP" && first == second && name == "all"
+                    ? wholeGenomeResolutions(*legacyFile) : vector<int32_t>{};
+                if (find(overview.begin(), overview.end(), queryResolution) == overview.end())
+                    throw StrawException(StrawErrorCode::Unavailable, "requested resolution is not available");
+            }
             transpose = firstIt->second.index > secondIt->second.index;
             intra = first == second;
             const string &storedFirst = transpose ? second : first;
@@ -2381,6 +2388,59 @@ vector<pair<string, string>> getAttributesForFile(const string &fileName) {
     return HiCFile(fileName).attributes;
 }
 
+static vector<int32_t> wholeGenomeResolutions(HiCFile &file) {
+    const auto chromosomes = file.getChromosomes();
+    const auto all = find_if(chromosomes.begin(), chromosomes.end(), [](const chromosome &chr) {
+        string name = chr.name;
+        transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return std::tolower(c); });
+        return name == "all";
+    });
+    if (all == chromosomes.end()) return {};
+    HiCFileStream stream(file.fileName);
+    int64_t position = 0;
+    indexEntry first{}, second{};
+    vector<double> expected;
+    bool found = false;
+    if (stream.isHttp) {
+        found = readFooterURL(stream.curl, file.master, file.version, all->index, all->index,
+                              "observed", "NONE", "BP", 0, position, first, second, expected,
+                              file.nviPosition, file.nviLength);
+    } else {
+        stream.fin.seekg(file.master);
+        found = readFooter(stream.fin, file.master, file.version, all->index, all->index,
+                           "observed", "NONE", "BP", 0, position, first, second, expected,
+                           file.nviPosition, file.nviLength);
+    }
+    stream.close();
+    if (!found) return {};
+    straw_file::Source source(file.fileName);
+    auto bytes = source.read(position, 12);
+    straw_v10::Cursor header(bytes);
+    header.word(); header.word();
+    const uint32_t count = header.word();
+    if (count > 100000) throw runtime_error("invalid All matrix resolution count");
+    uint64_t offset = static_cast<uint64_t>(position) + 12;
+    vector<int32_t> result;
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto prefix = source.read(offset, 3);
+        const bool bp = prefix[0] == 'B' && prefix[1] == 'P' && prefix[2] == 0;
+        const uint64_t unitSize = bp ? 3 : 5;
+        bytes = source.read(offset, unitSize + 36);
+        if (!bp && string(reinterpret_cast<const char *>(bytes.data()), 5) != string("FRAG\0", 5))
+            throw runtime_error("invalid All matrix unit");
+        straw_v10::Cursor zoom(bytes);
+        zoom.at = unitSize + 20; // unit, old zoom index, four summary floats
+        const uint32_t resolution = zoom.word();
+        zoom.word(); zoom.word();
+        const uint32_t blocks = zoom.word();
+        const uint64_t length = unitSize + 36 + uint64_t(blocks) * 16;
+        source.interval(offset, length);
+        offset += length;
+        if (bp && resolution > 0 && resolution <= INT32_MAX) result.push_back(static_cast<int32_t>(resolution));
+    }
+    return result;
+}
+
 StrawFileInfo getFileInfo(const string &fileName) {
     StrawFileInfo info;
     if (straw_v10::isV10(fileName)) {
@@ -2389,6 +2449,10 @@ StrawFileInfo getFileInfo(const string &fileName) {
         info.genome = file.genome();
         info.chromosomes = file.chromosomes();
         info.bpResolutions = file.resolutions("BP");
+        info.wholeGenomeResolutions = info.bpResolutions;
+        straw_v10::AllOverview overview;
+        if (file.allOverview(overview) && overview.version == 2)
+            info.wholeGenomeResolutions = {static_cast<int32_t>(overview.finestResolution)};
         info.fragResolutions = file.resolutions("FRAG");
         info.normalizations = file.normalizations();
         if (find(info.normalizations.begin(), info.normalizations.end(), "NONE") ==
@@ -2403,6 +2467,7 @@ StrawFileInfo getFileInfo(const string &fileName) {
     info.genome = file.genomeID;
     info.chromosomes = file.getChromosomes();
     info.bpResolutions = file.resolutions;
+    info.wholeGenomeResolutions = wholeGenomeResolutions(file);
     info.fragResolutions = file.fragResolutions;
     info.normalizations = getNormalizationsForFile(fileName);
     info.attributes = file.attributes;
