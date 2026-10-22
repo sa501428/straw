@@ -93,32 +93,35 @@ module HicStraw
     end
 
     def version
-      Native.straw_file_format_version(@handle)
+      Native.straw_file_format_version(open_handle)
     end
 
     def genome
-      Native.straw_file_genome(@handle)
+      Native.straw_file_genome(open_handle)
     end
 
     def chromosomes
-      Native.straw_file_chromosome_count(@handle).times.map do |index|
-        Chromosome.new(index: Native.straw_file_chromosome_index(@handle, index),
-                       name: Native.straw_file_chromosome_name(@handle, index),
-                       length: Native.straw_file_chromosome_length(@handle, index))
+      handle = open_handle
+      Native.straw_file_chromosome_count(handle).times.map do |index|
+        Chromosome.new(index: Native.straw_file_chromosome_index(handle, index),
+                       name: Native.straw_file_chromosome_name(handle, index),
+                       length: Native.straw_file_chromosome_length(handle, index))
       end
     end
 
     def resolutions(unit = "BP")
-      Native.straw_file_resolution_count(@handle, unit).times.map do |index|
-        Native.straw_file_resolution(@handle, unit, index)
+      handle = open_handle
+      Native.straw_file_resolution_count(handle, unit).times.map do |index|
+        Native.straw_file_resolution(handle, unit, index)
       end
     end
 
     def records(first, second, resolution:, normalization: "NONE",
                 matrix_type: "observed", unit: "BP")
+      handle = open_handle
       output = FFI::MemoryPointer.new(:pointer)
       error = FFI::MemoryPointer.new(:pointer)
-      HicStraw.check(Native.straw_query_records_simple(@handle, matrix_type, normalization,
+      HicStraw.check(Native.straw_query_records_simple(handle, matrix_type, normalization,
         first, second, unit, resolution, output, error), error)
       owner = output.read_pointer
       begin
@@ -132,9 +135,10 @@ module HicStraw
     end
 
     def raw(first, second, resolution:, unit: "BP")
+      handle = open_handle
       output = FFI::MemoryPointer.new(:pointer)
       error = FFI::MemoryPointer.new(:pointer)
-      HicStraw.check(Native.straw_query_raw(@handle, first, second, unit, resolution,
+      HicStraw.check(Native.straw_query_raw(handle, first, second, unit, resolution,
                                             output, error), error)
       owner = output.read_pointer
       begin
@@ -151,6 +155,11 @@ module HicStraw
     end
 
     private
+
+    def open_handle
+      raise IOError, "Hi-C file is closed" if @closed
+      @handle
+    end
 
     def read_int64(pointer, count)
       count.zero? ? [] : pointer.read_array_of_type(:int64, :read_int64, count)
