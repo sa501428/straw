@@ -596,7 +596,7 @@ struct File::Impl {
     }
     template <typename Emit>
     void materialized(Pair key, const Zoom &z, uint64_t x0, uint64_t x1, uint64_t y0, uint64_t y1,
-                      Emit &&cb) {
+                      Emit &&cb, const std::function<void(uint32_t)> &blockFinished = {}) {
         uint64_t totalBlocks = 0, totalCells = 0, sum = 0;
         const auto &index = blockIndex(z);
         const auto ranges = candidateBlockRanges(z, x0, x1, y0, y1);
@@ -621,6 +621,7 @@ struct File::Impl {
                     cb(r, entry->number);
                 });
                 ++totalBlocks;
+                if (blockFinished) blockFinished(entry->number);
             }
         }
         if (totalBlocks == index.size())
@@ -750,6 +751,8 @@ struct File::Impl {
                 acc.scores.push_back(r);
                 ++bufferedScores;
             } else acc.count = add(acc.count, r.count);
+        }, [&](uint32_t number) {
+            if (!spilling) flush(number, UINT64_MAX);
         });
         if (!spilling) {
             flush(UINT64_MAX, UINT64_MAX);
