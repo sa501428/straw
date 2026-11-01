@@ -51,6 +51,9 @@ if(BUILD_TESTING)
     add_test(NAME v10_reader_conformance
       COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_v10.py
               $<TARGET_FILE:straw_cli> $<TARGET_FILE:v10_api_probe>)
+    add_test(NAME v10_derived_streaming
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_derived_stream.py
+              $<TARGET_FILE:v10_api_probe>)
     add_test(NAME normalization_dump
       COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_norm_dump.py
               $<TARGET_FILE:straw_cli> $<TARGET_FILE:v10_api_probe>)
@@ -92,6 +95,9 @@ if(BUILD_TESTING AND Python3_Interpreter_FOUND AND STRAW_TEST_HTTP)
   add_test(NAME v10_http_ranges
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_v10.py
             $<TARGET_FILE:straw_cli> $<TARGET_FILE:v10_api_probe> --http)
+  add_test(NAME v10_derived_http_streaming
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_derived_stream.py
+            $<TARGET_FILE:v10_api_probe> --http)
 endif()
 
 if(BUILD_TESTING)

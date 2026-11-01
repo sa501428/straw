@@ -8,9 +8,11 @@
 #include <fstream>
 #include <iostream>
 #include <mutex>
+#include <queue>
 #include <set>
 #include <sstream>
 #include <tuple>
+#include <unordered_map>
 #include <unordered_set>
 #include <zstd.h>
 
@@ -159,6 +161,100 @@ struct BlockEntry {
     uint64_t pos;
 };
 using Pair = std::pair<uint32_t, uint32_t>;
+
+constexpr size_t derivedBufferLimit = 65536;
+
+// Rare fallback when the unfinished block frontier exceeds the memory budget.
+// Runs contain target coordinates for counts, source coordinates for scores.
+// Sorting scores by (target Y, target X, source Y, source X) preserves the
+// format's summation order even when source blocks arrive in rotated-grid order.
+// Binary merging bounds both memory and the number of open temporary files.
+class DerivedRuns {
+    struct Run {
+        std::unique_ptr<FILE, decltype(&std::fclose)> file{std::tmpfile(), &std::fclose};
+        uint64_t size = 0, remaining = 0;
+        Record head{};
+        bool ready = false;
+        Run() { require(bool(file), "cannot create derived aggregation temporary file"); }
+        void put(const Record &r) {
+            require(std::fwrite(&r, sizeof(r), 1, file.get()) == 1,
+                    "cannot write derived aggregation temporary file");
+            size = add(size, 1);
+        }
+        void next() {
+            ready = remaining != 0;
+            if (ready) {
+                require(std::fread(&head, sizeof(head), 1, file.get()) == 1,
+                        "cannot read derived aggregation temporary file");
+                --remaining;
+            }
+        }
+        void rewind() {
+            require(std::fseek(file.get(), 0, SEEK_SET) == 0,
+                    "cannot rewind derived aggregation temporary file");
+            remaining = size;
+            next();
+        }
+    };
+    uint64_t factor;
+    std::vector<Record> buffer;
+    std::vector<std::unique_ptr<Run>> levels;
+    bool less(const Record &a, const Record &b) const {
+        return std::make_tuple(a.binY / factor, a.binX / factor, a.binY, a.binX) <
+               std::make_tuple(b.binY / factor, b.binX / factor, b.binY, b.binX);
+    }
+    std::unique_ptr<Run> merge(std::unique_ptr<Run> a, std::unique_ptr<Run> b) {
+        std::unique_ptr<Run> out(new Run);
+        while (a->ready || b->ready) {
+            Run &in = !b->ready || (a->ready && less(a->head, b->head)) ? *a : *b;
+            out->put(in.head);
+            in.next();
+        }
+        out->rewind();
+        return out;
+    }
+    void spill() {
+        if (buffer.empty()) return;
+        std::sort(buffer.begin(), buffer.end(), [&](const Record &a, const Record &b) {
+            return less(a, b);
+        });
+        std::unique_ptr<Run> run(new Run);
+        for (const auto &r : buffer) run->put(r);
+        run->rewind();
+        buffer.clear();
+        size_t level = 0;
+        while (level < levels.size() && levels[level]) {
+            run = merge(std::move(levels[level]), std::move(run));
+            ++level;
+        }
+        if (level == levels.size()) levels.emplace_back();
+        levels[level] = std::move(run);
+    }
+  public:
+    explicit DerivedRuns(uint64_t factor) : factor(factor) {}
+    void push(const Record &r) {
+        buffer.push_back(r);
+        if (buffer.size() == derivedBufferLimit) spill();
+    }
+    template <typename Emit> void finish(Emit &&emit) {
+        // Avoid creating a temporary file when the entire remainder fits RAM.
+        if (levels.empty()) {
+            std::sort(buffer.begin(), buffer.end(), [&](const Record &a, const Record &b) {
+                return less(a, b);
+            });
+            for (const auto &r : buffer) emit(r);
+            return;
+        }
+        spill();
+        std::unique_ptr<Run> run;
+        for (auto &level : levels) if (level)
+            run = run ? merge(std::move(run), std::move(level)) : std::move(level);
+        if (run) while (run->ready) {
+            emit(run->head);
+            run->next();
+        }
+    }
+};
 uint32_t distanceDepth(uint64_t d, uint32_t blockBinCount) {
     uint32_t depth = 0;
     using Wide = unsigned __int128;
@@ -522,7 +618,7 @@ struct File::Impl {
                     ++totalCells;
                     if (!z.type)
                         sum = add(sum, r.count);
-                    cb(r);
+                    cb(r, entry->number);
                 });
                 ++totalBlocks;
             }
@@ -542,7 +638,7 @@ struct File::Impl {
                    (key.first == key.second && y >= x0 && y < x1 && x >= y0 && x < y1);
         };
         if (!z->mode) {
-            materialized(key, *z, x0, x1, y0, y1, [&](const Record &r) {
+            materialized(key, *z, x0, x1, y0, y1, [&](const Record &r, uint32_t) {
                 if (inside(r.binX, r.binY))
                     cb(r);
             });
@@ -550,106 +646,136 @@ struct File::Impl {
         }
         const Zoom &source = *zoom(key, unit, z->source);
         const uint64_t factor = z->bin / source.bin;
-        constexpr size_t limit = 65536;
-        struct Split {};
-        struct Acc { uint64_t count = 0; double score = 0; };
         uint64_t emitted = 0, total = 0;
         auto publish = [&](const Record &r) {
             ++emitted;
             if (!r.isScore) total = add(total, r.count);
             cb(r);
         };
-        // For an unusually large score aggregation factor, even one target
-        // pixel may exceed the buffer. Traverse source rows in bounded batches.
-        std::function<void(uint64_t,uint64_t,uint64_t,uint64_t,double&)> orderedScore;
-        orderedScore = [&](uint64_t a, uint64_t b, uint64_t c, uint64_t d, double &sum) {
-            std::vector<Record> records;
-            try {
-                materialized(key, source, a, b, c, d, [&](const Record &r) {
-                    if (r.binX < a || r.binX >= b || r.binY < c || r.binY >= d) return;
-                    if (records.size() == limit) throw Split{};
-                    records.push_back(r);
-                });
-            } catch (const Split &) {
-                std::vector<Record>().swap(records);
-                if (d - c > 1) {
-                    const auto mid = c + (d - c) / 2;
-                    orderedScore(a, b, c, mid, sum); orderedScore(a, b, mid, d, sum);
-                } else {
-                    require(b - a > 1, "duplicate source cells");
-                    const auto mid = a + (b - a) / 2;
-                    orderedScore(a, mid, c, d, sum); orderedScore(mid, b, c, d, sum);
-                }
-                return;
-            }
-            std::sort(records.begin(), records.end(), [](const Record &a, const Record &b) {
-                return std::tie(a.binY, a.binX) < std::tie(b.binY, b.binX);
-            });
-            for (const auto &r : records) {
-                require(std::isfinite(r.score), "nonfinite derived source score");
-                sum += double(r.score);
-                require(std::isfinite(sum), "derived score overflow");
-            }
+        auto scoreSum = [](double &sum, const Record &r) {
+            require(std::isfinite(r.score), "nonfinite derived source score");
+            sum += double(r.score);
+            require(std::isfinite(sum), "derived score overflow");
         };
-        std::function<void(uint64_t,uint64_t,uint64_t,uint64_t)> visit;
-        visit = [&](uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
-            std::map<std::pair<uint32_t,uint32_t>, Acc> sums;
+        struct Acc {
+            uint64_t count = 0;
             std::vector<Record> scores;
-            try {
-                materialized(key, source, a * factor, std::min(b * factor, h.bins(key.first, unit, source.ri)),
-                             c * factor, std::min(d * factor, h.bins(key.second, unit, source.ri)),
-                             [&](const Record &r) {
-                    const uint32_t x = r.binX / factor, y = r.binY / factor;
-                    // Assign a cis cell to exactly one query tile even when
-                    // both its canonical and reflected positions are requested.
-                    uint32_t px = x, py = y;
-                    if (!(x >= x0 && x < x1 && y >= y0 && y < y1)) {
-                        if (key.first != key.second) return;
-                        std::swap(px, py);
-                    }
-                    if (px < a || px >= b || py < c || py >= d) return;
-                    if (z->type) {
-                        if (scores.size() == limit) throw Split{};
-                        scores.push_back(r);
-                    } else {
-                        auto &acc = sums[{y, x}];
-                        acc.count = add(acc.count, r.count);
-                        if (sums.size() > limit) throw Split{};
-                    }
-                });
-            } catch (const Split &) {
-                // Release the parent buffers before descending.
-                sums.clear(); std::vector<Record>().swap(scores);
-                if (d - c > 1) {
-                    const auto mid = c + (d - c) / 2;
-                    visit(a, b, c, mid); visit(a, b, mid, d);
-                } else if (b - a > 1) {
-                    const auto mid = a + (b - a) / 2;
-                    visit(a, mid, c, d); visit(mid, b, c, d);
-                } else {
-                    uint64_t x = a, y = c;
-                    if (key.first == key.second && x > y) std::swap(x, y);
-                    double sum = 0;
-                    orderedScore(x * factor, std::min((x + 1) * factor, h.bins(key.first, unit, source.ri)),
-                                 y * factor, std::min((y + 1) * factor, h.bins(key.second, unit, source.ri)), sum);
-                    publish(Record{u32(x), u32(y), 0, static_cast<float>(sum), true});
+        };
+        // A target cell can straddle source block boundaries. Its deadline is
+        // an upper bound on (last source block number, last source row). Blocks
+        // are decoded in index order and cells within a block in row order.
+        // Passing that deadline proves no future cell can contribute to it.
+        using Deadline = std::tuple<uint32_t, uint64_t, uint64_t>;
+        std::priority_queue<Deadline, std::vector<Deadline>, std::greater<Deadline>> deadlines;
+        std::unordered_map<uint64_t, Acc> active;
+        size_t bufferedScores = 0;
+        const auto &index = blockIndex(source);
+        const uint64_t nx = h.bins(key.first, unit, source.ri);
+        const uint64_t ny = h.bins(key.second, unit, source.ri);
+        auto deadline = [&](uint32_t x, uint32_t y, uint64_t cell) {
+            const uint64_t firstX = uint64_t(x) * factor;
+            const uint64_t lastX = std::min((uint64_t(x) + 1) * factor, nx) - 1;
+            const uint64_t lastY = std::min((uint64_t(y) + 1) * factor, ny) - 1;
+            // The enclosing rotated-grid rectangle is conservative: an absent
+            // or geometrically unreachable final block only delays emission.
+            const uint64_t bound = source.grid
+                ? uint64_t(distanceDepth(lastY - firstX, source.B)) * source.columns +
+                      (lastX + lastY) / (uint64_t(2) * source.B)
+                : (lastY / source.B) * source.columns + lastX / source.B;
+            const auto end = std::upper_bound(index.begin(), index.end(), bound,
+                [](uint64_t number, const BlockEntry &entry) { return number < entry.number; });
+            require(end != index.begin(), "derived cell has no source block");
+            deadlines.emplace(std::prev(end)->number, lastY, cell);
+        };
+        auto flush = [&](uint64_t block, uint64_t row) {
+            while (!deadlines.empty()) {
+                const auto &d = deadlines.top();
+                if (std::get<0>(d) > block ||
+                    (std::get<0>(d) == block && std::get<1>(d) >= row)) break;
+                const uint64_t cell = std::get<2>(d);
+                auto found = active.find(cell);
+                auto &acc = found->second;
+                double score = 0;
+                if (z->type) {
+                    std::sort(acc.scores.begin(), acc.scores.end(), [](const Record &a, const Record &b) {
+                        return std::tie(a.binY, a.binX) < std::tie(b.binY, b.binX);
+                    });
+                    for (const auto &r : acc.scores) scoreSum(score, r);
+                    bufferedScores -= acc.scores.size();
                 }
+                publish(Record{uint32_t(cell), uint32_t(cell >> 32), acc.count,
+                               static_cast<float>(score), z->type != 0});
+                active.erase(found);
+                deadlines.pop();
+            }
+        };
+        DerivedRuns runs(z->type ? factor : 1);
+        bool spilling = false;
+        auto spillActive = [&]() {
+            // Completed cells have already been emitted and cannot recur. Only
+            // unfinished cells and the remainder of the scan enter these runs.
+            for (const auto &entry : active) {
+                if (z->type) {
+                    for (const auto &r : entry.second.scores) runs.push(r);
+                } else {
+                    runs.push(Record{uint32_t(entry.first), uint32_t(entry.first >> 32),
+                                     entry.second.count, 0, false});
+                }
+            }
+            active.clear();
+            decltype(deadlines)().swap(deadlines);
+            spilling = true;
+        };
+        materialized(key, source, x0 * factor, std::min(x1 * factor, nx),
+                     y0 * factor, std::min(y1 * factor, ny),
+                     [&](const Record &r, uint32_t number) {
+            if (!spilling) flush(number, r.binY);
+            const uint32_t x = r.binX / factor, y = r.binY / factor;
+            if (!inside(x, y)) return;
+            const uint64_t cell = (uint64_t(y) << 32) | x;
+            if (!spilling && (z->type ? bufferedScores == derivedBufferLimit
+                                      : active.size() == derivedBufferLimit && !active.count(cell)))
+                spillActive();
+            if (spilling) {
+                runs.push(z->type ? r : Record{x, y, r.count, 0, false});
                 return;
             }
-            std::sort(scores.begin(), scores.end(), [](const Record &a, const Record &b) {
-                return std::tie(a.binY, a.binX) < std::tie(b.binY, b.binX);
-            });
-            for (const auto &r : scores) {
-                require(std::isfinite(r.score), "nonfinite derived source score");
-                auto &acc = sums[{r.binY / factor, r.binX / factor}];
-                acc.score += double(r.score);
-                require(std::isfinite(acc.score), "derived score overflow");
+            auto found = active.find(cell);
+            if (found == active.end()) {
+                found = active.emplace(cell, Acc{}).first;
+                deadline(x, y, cell);
             }
-            for (const auto &e : sums)
-                publish(Record{e.first.second, e.first.first, e.second.count,
-                               static_cast<float>(e.second.score), z->type != 0});
-        };
-        visit(x0, x1, y0, y1);
+            auto &acc = found->second;
+            if (z->type) {
+                acc.scores.push_back(r);
+                ++bufferedScores;
+            } else acc.count = add(acc.count, r.count);
+        });
+        if (!spilling) {
+            flush(UINT64_MAX, UINT64_MAX);
+        } else {
+            bool have = false;
+            Record result{};
+            double score = 0;
+            auto finish = [&]() {
+                if (!have) return;
+                result.score = static_cast<float>(score);
+                publish(result);
+            };
+            runs.finish([&](const Record &r) {
+                const uint32_t x = z->type ? r.binX / factor : r.binX;
+                const uint32_t y = z->type ? r.binY / factor : r.binY;
+                if (!have || result.binX != x || result.binY != y) {
+                    finish();
+                    result = Record{x, y, 0, 0, z->type != 0};
+                    score = 0;
+                    have = true;
+                }
+                if (z->type) scoreSum(score, r);
+                else result.count = add(result.count, r.count);
+            });
+            finish();
+        }
         if (x0 == 0 && y0 == 0 && x1 == h.bins(key.first, unit, ri) && y1 == h.bins(key.second, unit, ri))
             require(emitted == z->occupied && (z->type || total == z->sum), "derived matrix statistics mismatch");
     }

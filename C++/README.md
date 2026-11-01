@@ -430,8 +430,14 @@ streaming, region, normalization, dense-matrix, record-count, and slice entry
 points also dispatch to V10. Legacy APIs reject coordinate overflow rather than
 wrapping a 32-bit coordinate. Parsing, decompression, full vectors, and dense
 output have explicit allocation limits (512 MiB per record/allocation class).
-Derived streaming queries bound aggregation buffers to 65,536 entries,
-subdividing larger windows and preserving global source-coordinate score order.
+Derived streaming queries read each selected source block once. Aggregates are
+emitted when the source block/row frontier has passed every possible contributor
+to that target cell, retaining unfinished boundary cells across blocks. The
+aggregation budget is 65,536 target cells for counts or source records for scores.
+If unfinished cells exceed that budget, bounded sorted runs in automatically
+removed temporary files handle the remainder without rereading source blocks.
+Integer sums remain exact; scores retain global source-coordinate summation order.
+Streaming record order follows completion of cells and is not globally sorted.
 Collecting an entire result or dense matrix still requires memory proportional to
 that output.
 

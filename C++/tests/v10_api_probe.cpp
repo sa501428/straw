@@ -12,8 +12,13 @@ int main(int argc, char **argv) {
             return 0;
         }
         straw_v10::File file(path);
-        if (mode == "raw") {
-            auto cb = [](const straw_v10::Record &r) {
+        if (mode == "raw" || mode == "raw-progress") {
+            uint64_t records = 0;
+            auto cb = [&](const straw_v10::Record &r) {
+                if (mode == "raw-progress") {
+                    if (++records == 1) std::cout << "first\n" << std::flush;
+                    return;
+                }
                 std::cout << r.binX << ' ' << r.binY << ' ';
                 if (r.isScore) {
                     uint32_t bits;
@@ -23,8 +28,12 @@ int main(int argc, char **argv) {
                     std::cout << "c " << r.count;
                 std::cout << '\n';
             };
-            file.raw(argv[3], argv[4], argc > 6 ? argv[6] : "BP", std::stoi(argv[5]), 0, UINT32_MAX,
-                     0, UINT32_MAX, cb);
+            file.raw(argv[3], argv[4], argc > 6 ? argv[6] : "BP", std::stoi(argv[5]),
+                     argc > 7 ? std::stoull(argv[7]) : 0,
+                     argc > 8 ? std::stoull(argv[8]) : UINT32_MAX,
+                     argc > 9 ? std::stoull(argv[9]) : 0,
+                     argc > 10 ? std::stoull(argv[10]) : UINT32_MAX, cb);
+            if (mode == "raw-progress") std::cout << "records " << records << '\n';
         } else if (mode == "norm") {
             for (double v : file.normalization(argv[3], "BP", std::stoi(argv[4]), "VC"))
                 std::cout << v << '\n';
